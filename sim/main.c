@@ -160,6 +160,24 @@ static void film_just_over(tank_t *t, float share) {
 
 /* ---------- headless selftest ---------- */
 static int selftest(void) {
+    {   /* every pellet reaches the floor (0.3.7, a keeper on the watch: "pellets seem to
+           disappear before they reach the bottom where the shrimp can reach them"):
+           a fishless tank, a feeding at the deepest drop and at either side */
+        static tank_t ft; tank_init(&ft, 3);
+        float xs[3] = { TANK_W * 0.5f, TANK_FX0 + 60, TANK_FX1 - 60 };
+        float worst = 0;
+        for (int j = 0; j < 3; j++) tank_feed(&ft, xs[j], 3);
+        bool landed[MAX_FOOD] = { 0 };
+        for (int i = 0; i < 60 * 120; i++) {
+            tank_tick(&ft, 1.0f / 60.0f, advisor_rules);
+            for (int k = 0; k < MAX_FOOD; k++)
+                if (ft.food[k].alive && ft.food[k].floor_s > 0 && !landed[k]) { landed[k] = true; if (ft.food[k].age > worst) worst = ft.food[k].age; }
+        }
+        int n = 0, ok = 0;
+        for (int k = 0; k < 9 && k < MAX_FOOD; k++) { n++; if (landed[k]) ok++; }
+        if (ok != n) { printf("FAIL: %d of %d pellets vanished in the water before the floor (life %.0f s)\n", n - ok, n, FOOD_LIFE_S); return 1; }
+        printf("selftest: pellets: all %d reached the floor, the longest fall %.1f s (the water's cap %.1f s)\n", n, worst, FOOD_LIFE_S);
+    }
     tank_init(&tank, 1234);
     tank_new_population(&tank);
     print_roster(&tank);
@@ -3973,7 +3991,7 @@ static int selftest_shop(void) {
             if (k == MAX_FOOD) { printf("FAIL: no free pellet slot\n"); return 1; } \
             food_t *p_ = &tank.food[k]; memset(p_, 0, sizeof *p_); p_->alive = true; p_->x = (px); p_->y = (py); p_->age = (page); } while (0)
         for (int k = 0; k < MAX_FOOD; k++) tank.food[k].alive = false;
-        /* the floor rest, far from the school: gone at 45 s in the water, 15 s after landing on the floor.
+        /* the floor rest, far from the school: gone at FOOD_LIFE_S in the water, 15 s after landing on the floor.
            The school is put off its food for it, by its own rule - a fouled glass: it swims the bowl's
            floor and the watch's end to end inside the 15 s and ate the pellet (the rectangle's far end
            was a second or two out of its reach) */
@@ -3981,7 +3999,7 @@ static int selftest_shop(void) {
         int k;
         float far_x = tank.shrimp[0].x < TANK_W / 2 ? TANK_FX1 - 30 : TANK_FX0 + 30;   /* the floor's far end */
         PUT_PELLET(k, far_x, FOOD_FLOOR_Y, 43);
-        int kw; PUT_PELLET(kw, far_x, 200, 44.5f);
+        int kw; PUT_PELLET(kw, far_x, 200, FOOD_LIFE_S - 0.5f);
         SHRIMP_TICK(60);
         if (tank.food[kw].alive || !tank.food[k].alive) { printf("FAIL: a pellet in the water outlived %.0f s, or the floor pellet went early\n", FOOD_LIFE_S); return 1; }
         SHRIMP_TICK(60 * 13);

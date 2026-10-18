@@ -2709,7 +2709,7 @@ void tank_tick(tank_t *t, float dt, advisor_fn advise) {
         live_food++;
         p->age += dt;
         if (p->y < FOOD_FLOOR_Y) {
-            p->y += 8 * dt;
+            p->y += FOOD_SINK_PX_S * dt;
             p->x += sinf(p->age * 1.5f) * dt * 2;
         } else p->floor_s += dt;                        /* resting on the floor (FOOD_FLOOR_S) */
         if (p->floor_s > 0 ? p->floor_s > FOOD_FLOOR_S : p->age > FOOD_LIFE_S) p->alive = false;
