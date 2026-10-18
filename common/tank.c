@@ -1437,7 +1437,7 @@ static void seahorse_tick(tank_t *t, float dt) {
     if (!(t->sd_unlocks & SD_ITEM_SEAHORSE)) return;
     if (t->sh_x < 0) tank_seahorse_place(t);
     t->sh_s += dt;
-    if (!t->night) sh_snack(t, dt);
+    sh_snack(t, dt);                                               /* in the dark too: the fish eat then (0.3.7) */
     bool finger = t->hold_active && t->hold_time >= HOLD_ATTRACT_S;
     if (finger) {                                                  /* the one thing that moves it at once */
         if (t->sh_mode != SH_HITCH) { t->sh_mode = SH_HITCH; t->sh_akind = SH_ANCHOR_NONE; t->sh_bed = t->sh_frond = -1; t->sh_hitched = false; t->sh_credited = false; }
@@ -1459,7 +1459,6 @@ static void seahorse_tick(tank_t *t, float dt) {
         if (t->sh_stay > 0) return;
         sh_let_go(t, 0);
     }
-    if (t->night) { t->sh_vx = t->sh_vy = 0; return; }             /* a night where it is */
     if (t->sh_mode == SH_PERCH) {
         if (!sh_hold_ok(t)) {                                      /* the scissors took its blade, the piece moved */
             /* a SHORT wait before it looks again: the blade's stay timer used
@@ -1488,6 +1487,12 @@ static void seahorse_tick(tank_t *t, float dt) {
             t->sh_look -= dt;
             if (t->sh_look <= 0) { t->sh_look = 2.0f; if (sh_any_hold(t)) { sh_let_go(t, 0); return; } }
         }
+        /* the dark: it stays on its hold till the light (it rests like the
+         * fish). Only this - the night used to stop every move, so a seahorse
+         * let off the finger in the dark hung in open water where the finger
+         * was until the light came on (Strato 2026-10-18); a trip home, a
+         * knock-off and a new plant all still run now. */
+        if (t->night) return;
         t->sh_stay -= dt;
         if (t->sh_stay <= 0) {                                     /* off to another (from the sand: a look around) */
             if (t->sh_akind != SH_ANCHOR_SAND && !sh_another_hold(t)) { t->sh_stay = sh_stay_for(t); return; }   /* the only hold there is: it stays */
