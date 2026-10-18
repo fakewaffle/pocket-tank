@@ -60,7 +60,8 @@ static double pow10_(double db) {            /* 10^(db/20) without libm's pow in
     double x = db / 20.0, r = 1.0, b = 10.0;
     int neg = x < 0; if (neg) x = -x;
     int n = (int)x; x -= n;
-    while (n--) r *= b;
+    for (int i = 0; i < n && i < 32; i++) r *= b;   /* bounded (0.3.7): gcc -O2 on CI flagged the open loop once the
+                                                    * night term left db two values; |db| stays far under 640 */
     /* fractional part by a short series of exp(x ln10) */
     double t = x * 2.302585092994046, e = 1.0, term = 1.0;
     for (int i = 1; i < 12; i++) { term *= t / i; e += term; }
