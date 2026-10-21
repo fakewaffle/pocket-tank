@@ -247,8 +247,8 @@ bool net_time_sync(int64_t *unix_out, int64_t *at_us) {
     return ok;
 }
 static uint32_t parse_release(const char *s) {
-    int a = 0, b = 0, c = 0; if (sscanf(s, "%d.%d.%d", &a, &b, &c) < 2) return 0;
-    return ((uint32_t)a << 16) | ((uint32_t)b << 8) | (uint32_t)c;
+    int a = 0, b = 0, c = 0, d = 0; if (sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d) < 2) return 0;
+    return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)c << 8) | (uint32_t)d;   /* version.h: four bytes since 0.3.8.1 */
 }
 static bool parse_manifest(const char *json, update_manifest_t *m) {
     cJSON *root = cJSON_Parse(json); if (!root) return false;
