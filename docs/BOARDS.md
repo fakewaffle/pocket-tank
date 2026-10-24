@@ -93,6 +93,17 @@ pixel instead of a name - fix that instead.
    day of catching the crab's layering by eye: "this will not be the last
    time this comes up as we add new decorations features and critters".
 
+7. **Linux before a tag (2026-10-24).** The gate above runs on this Mac;
+   CI runs it on Linux (gcc, glibc), and a selftest whose margin sits
+   exactly where the two libraries round differently passes here and fails
+   there. v0.3.9's public commit failed `checks` on two such margins (the
+   tend hold's slower fish at 30 px = HOLD_APPROACH_AT; the seahorse's
+   look from the sand over inside the second the test sampled at). So
+   before a release tag: `pocket-tank/tools/check_linux.sh` (the same
+   check-all in an ubuntu:26.04 container; `--all` lists every failure in
+   one run). A test that fails on Linux alone is a test with a margin:
+   test the claim, not the margin.
+
 ## Releases
 
 One image per board, one release number. Built 2026-10-02 for 0.3.0 (Strato:
