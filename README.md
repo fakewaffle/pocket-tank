@@ -372,7 +372,7 @@ too, throws a shadow across the sand. Finally a good reason to turn the
 tank light off.
 
 **The bubble volcano.** The tenth thing in the shop (190). A cone of
-stacked boulders as tall as the castle, with a pool of lava at the top
+stacked boulders as wide as the castle, with a pool of lava at the top
 that breathes, a stream of bubbles rising from the crater and a cave at
 its foot. Turn the tank light off and the lava and the bubbles keep their
 glow on the water and the sand. BEHIND or IN FRONT, like the castle.
