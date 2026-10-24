@@ -85,6 +85,14 @@ pixel instead of a name - fix that instead.
    pictured / built / flashed / tried on the glass. "Not flashed" is a fine
    state; "unknown" is not.
 
+6. **The render stack (2026-10-24).** Anything new that stands on the sand
+   or is placed in the tank - a critter, a decoration, a lane, a hiding
+   place - gets its row in docs/render-stack.md FIRST, and `fishsim
+   --selftest-stack` (the matrix that derives its checks from that table)
+   must pass in four worlds before the thing is called done. Strato, after a
+   day of catching the crab's layering by eye: "this will not be the last
+   time this comes up as we add new decorations features and critters".
+
 ## Releases
 
 One image per board, one release number. Built 2026-10-02 for 0.3.0 (Strato:
