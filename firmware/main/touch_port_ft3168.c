@@ -699,7 +699,9 @@ void touch_port_poll(tank_t *t) {
         else if (s_ms && !s_back && fabsf(dx) >= 40 && fabsf(dx) > 2 * fabsf(dy)) {   /* sideways along the TANK row: its page (2026-09-30) */
             if (render_milestones_swipe(t, s_px, s_py, dx)) ESP_LOGI(TAG, "page swipe %.0f px on the tank row", dx);
         }
-        else if (!s_ms && t->tool == TOOL_HAND && s_py - tank_glass_top(s_px) < 60 && dy >= 40) tank_feed(t, s_lx, 3);  /* drag down from the top = feed (not with a tool in hand) */
+        else if (!modal && !s_back && t->tool == TOOL_HAND && s_py - tank_glass_top(s_px) < 60 && dy >= 40) tank_feed(t, s_lx, 3);  /* drag down from the top = feed (not with a tool in hand,
+                                                                  never under a page: 0.3.9.1, a keeper fed the tank from the SETTINGS page - a tap at its top that slid
+                                                                  40 px read as this drag, and only the keeper page held it off) */
     }
 released:
     if (!touched) s_held_page = false;

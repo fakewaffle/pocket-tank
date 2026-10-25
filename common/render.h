@@ -144,6 +144,8 @@ void render_stats_card(const tank_t *t, int fish_idx, uint16_t *fb, int stride);
 #define RENDER_CARD_HIT(x, y) ((x) >= RENDER_CARD_X - RENDER_CARD_HIT_SIDE && (x) < RENDER_CARD_X + RENDER_CARD_W + RENDER_CARD_HIT_SIDE && \
                                (y) >= RENDER_CARD_Y && (y) < RENDER_CARD_Y + RENDER_CARD_H + RENDER_CARD_HIT_BELOW)
 void render_set_card_cache(uint16_t *buf);
+void render_crab_cache(bool on);        /* the crab's pose grids kept (on, the default) or built every pose change: the selftest's A/B (0.3.9.1) */
+int  render_crab_builds(void);          /* the crab's grid builds so far */
 /* The TOOLBOX (2026-10-01): under a fish's card, a little apart from it so
  * MORE keeps its own ground, a box in the card's dress with two big buttons
  * - the SPONGE and the SCISSORS (tank.h TOOL_*). render_stats_card draws it
@@ -201,9 +203,13 @@ bool render_tool_chip_hit(const tank_t *t, float x, float y);
  * below and to the left) opens the battery page - while the pill shows. */
 #define RENDER_BAT_W 32
 #define RENDER_BAT_H 15
-#ifdef TANK_ROUND               /* the bowl has no top right corner: top centre, the bolt left of it */
-#define RENDER_BAT_X ((TANK_W - RENDER_BAT_W) / 2 + 10)
-#define RENDER_BAT_Y 16
+#ifdef TANK_ROUND               /* the bowl: in the NEXT arrow's lane, to the right - its right end 48 px in from the circle at its top
+                                   line (the glass is at x 400 there), the bolt left of it (0.3.9.1, Strato's mockup: a keeper tapping
+                                   the arrow to step through the fish opened the battery page - the pill sat top centre and its slop
+                                   reached over the arrow, and the pill's tap is tested first). Its slop now starts 18 px right of the
+                                   arrow's */
+#define RENDER_BAT_X 320
+#define RENDER_BAT_Y (RENDER_NEXT_Y + (RENDER_NEXT_H - RENDER_BAT_H) / 2)
 #elif defined(TANK_WATCH)       /* the watch: the top right, in from its round corner */
 #define RENDER_BAT_X (TANK_W - RENDER_BAT_W - 56)
 #define RENDER_BAT_Y 22
@@ -494,6 +500,40 @@ void render_fish_portrait(uint16_t *fb, int stride, float x, float y, float size
 #define MSP_SET_Y     MSP_CLOSE_Y
 #define SHP_CLOSE_X   MSP_CLOSE_X
 #define SET_CLOSE_X   MSP_CLOSE_X
+#endif
+/* THE KEEPER PAGE'S FOOT (0.3.9.1; Strato 2026-10-25 on the square: the row pinned to the bottom of the frame on every
+ * board, as low as taps stay reliable - the square and the watch had a band of glass under it). Its last row of pixels
+ * sits MSP_FOOT_GAP above the glass's bottom where the bottom is flat (the watch's settings foot has stood 13 px off its
+ * glass since 10-02), and where a curve takes the corners (the watch's 100 px arcs, the bowl's circle) as low as each
+ * button's lower corners stay MSP_FOOT_IN inside the glass - the watch's three also close in on the middle. Frame y =
+ * page y + PAGE_Y. --selftest-shop checks every board: inside the glass, and one px lower would not be. The shop and
+ * the settings keep their own feet (MSP_CLOSE_Y, SET_FOOT_Y). */
+#define MSP_FOOT_GAP  12
+#define MSP_FOOT_IN   6
+#ifdef TANK_ROUND
+#define MSP_FOOT_Y    353               /* the circle: UPGRADES' and CLOSE's outer corners (frame x 123, 342) at 6 px in; 35 px off the bottom at the middle */
+#elif defined(TANK_WATCH)
+#define MSP_FOOT_Y    371               /* the arcs: the outer corners (frame x 33, 376) at 6 px in; 35 px off the bottom at the middle */
+#elif defined(TANK_SQUARE)
+#define MSP_FOOT_Y    382               /* flat: the last row at frame y 467, 12 above the glass's 480 (the 40 px corners end before the buttons) */
+#else
+#define MSP_FOOT_Y    326               /* flat: the last row at y 355, 12 above the glass's 368 (was 312) */
+#endif
+/* the foot's tap strip reaches HALF WAY up the gap to the TANK row (Strato 2026-10-25 on the square: a quick tap just
+ * over the buttons, the way a child taps, opened a tank milestone): from the row's last drawn line (the balance under
+ * the coin, MSP_TANK_Y + 48) to the buttons' top, the lower half is the buttons' */
+#define MSP_TANK_BOT     (MSP_TANK_Y + 48)
+#define MSP_FOOT_HIT_Y   ((MSP_TANK_BOT + MSP_FOOT_Y) / 2)
+#if TANK_WORN
+#define MSP_FOOT_SLOP    5              /* the strip's split between two buttons: half their gap */
+#define MSP_FOOT_UPG_X   52             /* the watch's three, 10 px apart and centred: frame x 33..149 | 159..275 | 285..377 */
+#define MSP_FOOT_SET_X   178
+#define MSP_FOOT_CLOSE_X 304
+#else
+#define MSP_FOOT_SLOP    8
+#define MSP_FOOT_UPG_X   MSP_UPG_X
+#define MSP_FOOT_SET_X   MSP_SET_X
+#define MSP_FOOT_CLOSE_X MSP_CLOSE_X
 #endif
 #define MSP_SD_X      36                /* the sand dollar on the TANK row (the shop), centred like the fish portraits */
 #ifdef TANK_ROUND

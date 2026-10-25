@@ -557,6 +557,7 @@ static void on_tank_event(int ev, int fish, void *ud) {
     case TEV_WELCOME:     audio_port_play(SND_WELCOME, AUDIO_PITCH_ONE); break;
     case TEV_WHEEL_TICK:  audio_port_play(SND_WHEEL_TICK, AUDIO_PITCH_ONE); break;
     case TEV_CONFIRM:     audio_port_play(SND_CONFIRM, AUDIO_PITCH_ONE); break;
+    case TEV_CRAB_FIND:   audio_port_play(SND_CRAB_FIND, AUDIO_PITCH_ONE); break;
     default: break;
     }
 }

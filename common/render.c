@@ -1297,6 +1297,7 @@ static int      g_coral_dzk = 99;
 #define VO_GLOW_MAX 640
 enum { VO_NONE = 0, VO_ROCK_L, VO_ROCK, VO_ROCK_D, VO_ROCK_DD, VO_SCORCH, VO_MOSS_A, VO_MOSS_B, VO_CAVE, VO_CAVE_MID,
        VO_CAVE_LIT, VO_LAVA_DIM, VO_LAVA, VO_LAVA_HOT, VO_LAVA_CORE, VO_N };          /* VO_CAVE_LIT.. glow: the lava's */
+#define CR_CACHE_N 24                              /* the crab's grids kept (draw_crab): a walk is 16 poses, a climb ~26 */
 typedef struct {
     uint8_t  co_sprite[CORAL_CH][CORAL_CW];
     uint16_t co_row[CO_N][CORAL_H];           /* [tone][row], row 0 = CORAL_FY - CORAL_H */
@@ -1326,7 +1327,9 @@ typedef struct {
     uint16_t vo_row[VO_N][VO_CH * VO_CELL];                 /* its rock tones per row, hazed and dimmed */
     uint16_t vo_glow[VO_GLOW_MAX];                          /* its lava cells (j * VO_CW + i): redrawn every frame */
     uint8_t  ur_tones[33 * 37];                              /* the urchin's tone grid, rebuilt a few times a second (2026-10-23) */
-    uint8_t  cr_tones[50 * 25], cr_parts[50 * 25];          /* the strawberry crab's (0.3.9): its tones and parts, rebuilt when its pose changes (CR_GW x CR_GH) */
+    uint8_t  cr_tones[CR_CACHE_N][50 * 25], cr_parts[50 * 25];   /* the strawberry crab's (0.3.9): its tone grids, one per pose seen lately (CR_GW x CR_GH), and the
+                                                                   build's parts (scratch) */
+    uint32_t cr_keys[CR_CACHE_N], cr_used[CR_CACHE_N];      /* ... each grid's pose (cr_hash; 0 = empty) and when it was last drawn (the least recent goes) */
     uint8_t  cr_card_tones[50 * 25], cr_card_parts[50 * 25]; /* its card's portrait, the roost (the tank's grid may hold a profile) */
     uint8_t  sn_tones[19 * 37];                              /* the upright snail's, likewise */
     uint16_t shelf_thumb[3][32 * 32];                       /* the shelf's little tanks (0.3.9): the plant, the coral, the cluster
@@ -1334,12 +1337,17 @@ typedef struct {
                                                              * full-size paint (shelf_build); the modal doubles it */
 } decor_scratch_t;
 static decor_scratch_t *g_ds;
+static const uint8_t *g_cr_tn;                    /* the crab's grid as drawn this frame (draw_crab): crab_covers reads it */
+static bool g_cr_nocache;                         /* the selftest's switch: a build every pose change, as before the cache */
+static int  g_cr_builds;                          /* builds so far (the selftest counts them) */
+void render_crab_cache(bool on) { g_cr_nocache = !on; }
+int  render_crab_builds(void) { return g_cr_builds; }
 static bool  g_pk_built;                          /* the pumpkin's sprite is in the scratch */
 static float g_pk_dim = -1;                       /* the dim its rind rows were tinted for */
 static int   g_pk_dzk = 99;                       /* and the shift (its depth) */
 size_t render_decor_scratch_size(void) { return sizeof(decor_scratch_t); }
 static float g_sng_heading;
-void   render_set_decor_scratch(void *buf) { g_ds = (decor_scratch_t *)buf; if (g_ds) memset(g_ds, 0, sizeof *g_ds); g_coral_q = -1; g_coral_rgb = 1; g_sng_heading = 1e9f; g_pk_built = false; g_pk_dim = -1; }
+void   render_set_decor_scratch(void *buf) { g_ds = (decor_scratch_t *)buf; if (g_ds) memset(g_ds, 0, sizeof *g_ds); g_cr_tn = NULL; g_coral_q = -1; g_coral_rgb = 1; g_sng_heading = 1e9f; g_pk_built = false; g_pk_dim = -1; }
 static inline decor_scratch_t *ds(void) { if (!g_ds) g_ds = (decor_scratch_t *)calloc(1, sizeof(decor_scratch_t)); return g_ds; }
 static uint32_t (*castle_front(void))[224 / 32] { return ds()->castle_front; }
 /* the bake of a piece IN FRONT records what it covers (bake_scene sets these) */
@@ -1887,14 +1895,17 @@ static void pk_casts(const tank_t *t, int pkx) {
     }
     pk_casts_pieces(t);
 }
-static const tank_t *g_cr_guard;                          /* a crab in the FRONT SLOT (before a piece IN FRONT, in a front volcano's cave, on its flank): the
-                                                             per-frame overlays - the volcano's lava and embers, the pumpkin's face and flame - keep off it
-                                                             (docs/render-stack.md; the matrix found the pumpkin's face painted over a crab walking past) */
-static bool crab_covers(const tank_t *t, int x, int y);
+static const tank_t *g_guard;                             /* the critters in the FRONT SLOT (before a piece IN FRONT; the crab in a front volcano's cave, on its
+                                                             flank): the per-frame overlays - the volcano's lava and embers, the pumpkin's face and flame - keep off
+                                                             them (docs/render-stack.md; the matrix found the pumpkin's face painted over a crab walking past; 0.3.9.1,
+                                                             Strato on the 1.8: the lava in the cave over the urchin walking past it - the snail and the urchin too) */
+enum { GUARD_CRAB = 1, GUARD_SNAIL = 2, GUARD_URCHIN = 4 };
+static unsigned g_guard_who;                              /* ... which of them */
+static bool slot_covers(int x, int y);
 static inline void pk_store(ctx_t *c, int x, int y, uint16_t v, bool final) {
     if (!CTX_IN(c, x, y) || under_bg(x, y)) return;
     if (g_pk_k >= 0 && pc_covered_above(g_pk_k, x, y)) return;   /* under a piece above it (the castle's stone, a coral IN FRONT, ...) */
-    if (g_cr_guard && crab_covers(g_cr_guard, x, y)) return;     /* the crab in the front slot before the lantern: its face stays under the crab */
+    if (g_guard && slot_covers(x, y)) return;                    /* a critter in the front slot before the lantern: its face stays under it */
     uint16_t *p = &CTX_PX(c, x, y);
     rec_px(x, y);
     *p = FB_SWAP16(v); TOUCH_PX(c, x, y);
@@ -2220,7 +2231,7 @@ static void vo_tint_fill(float dim) {
 static inline void vo_store(ctx_t *c, int x, int y, uint16_t v, bool final) {
     if (!CTX_IN(c, x, y) || under_bg(x, y)) return;
     if (g_clip_k >= 0 && pc_covered_above(g_clip_k, x, y)) return;   /* under a piece above it */
-    if (g_cr_guard && crab_covers(g_cr_guard, x, y)) return;         /* the crab in its cave: the embers stay under it (Strato, the pendant) */
+    if (g_guard && slot_covers(x, y)) return;                        /* the crab in its cave, a critter passing it: the embers stay under them (Strato, the pendant; the 1.8) */
     rec_px(x, y);
     uint16_t *p = &CTX_PX(c, x, y);
     *p = FB_SWAP16(v); TOUCH_PX(c, x, y);
@@ -2540,6 +2551,14 @@ static void draw_snail(ctx_t *c, const tank_t *t, bool upright_pass) {
             }
     }
 }
+/* does the snail on the floor (upright), as draw_snail painted it this frame (ds()->sn_tones), cover (x, y)? */
+static bool snail_covers(const tank_t *t, int x, int y) {
+    if (!(t->sd_unlocks & SD_ITEM_SNAIL) || t->snail_x < 0 || !tank_snail_upright(t)) return false;
+    const int ox = (int)t->snail_x, oy = (int)(t->snail_y + SNAIL_SOLE_DY);
+    const int lx = cosf(t->snail_heading) < 0 ? ox - x : x - ox, ly = y - oy;
+    if (lx < -16 || lx > 20 || ly < -18 || ly > 0) return false;
+    return ds()->sn_tones[(ly + 18) * 37 + lx + 16] != SN_NONE;
+}
 /* ---- the urchin, procedural (2026-10-02, SD_ITEM_URCHIN) ----
  * After Strato's sea-urchin-v1 (working-assets): a domed purple urchin seen
  * a little from above, a crown of short pointed spines with pale tips, warm
@@ -2649,6 +2668,13 @@ static void draw_urchin(ctx_t *c, const tank_t *t) {
             px_blend_s(c, cx + lx, y, &pal[tone], 255);
         }
     }
+}
+/* does the urchin, as draw_urchin painted it this frame (ds()->ur_tones), cover (x, y)? */
+static bool urchin_covers(const tank_t *t, int x, int y) {
+    if (!(t->sd_unlocks & SD_ITEM_URCHIN) || t->urchin_x < 0) return false;
+    const int lx = x - (int)floorf(t->urchin_x + 0.5f), ly = y - (int)(URCHIN_FLOOR_Y + t->urchin_dy);
+    if (lx < -18 || lx > 18 || ly < -16 || ly > (int)UR_BASE) return false;
+    return ds()->ur_tones[(ly + 16) * 37 + lx + 18] != UR_NONE;
 }
 
 /* ---- the strawberry crab, procedural (0.3.9, SD_ITEM_CRAB) ----
@@ -2773,14 +2799,17 @@ static void cr_pose(cr_pose_t *p, const tank_t *t) {
     const bool poke = t->cr_poke > 0 || t->cr_scurry || t->cr_find > 0;   /* a tap's claws up; running scared, claws up too; a find held up */
     if (t->cr_find > 0) p->find = 1 + (((int)(t->clock * 2)) & 1);     /* its glint beats twice a second (the grid rebuilds on the beat) */
     p->salt = 7 + t->cr_variant;
-    p->front = mode == CR_ROOST;
+    p->front = mode == CR_ROOST || t->cr_find > 0;                   /* a find: it turns to the glass and holds the coin up in both claws (Strato 2026-10-24) */
     if (p->front) {                                                   /* the roost: strawberry_proc.py pose() */
         float settle = t->cr_mode_s < 1.2f ? floorf((1 - t->cr_mode_s / 1.2f) * 6) / 6 : 0;   /* it settles in: legs spread, then drawn under */
         float stretch = 0;
         if (t->cr_fidget_kind == CR_FID_STRETCH) stretch = floorf(fast_sin((1 - t->cr_fidget / CR_STRETCH_S) * 3.14159f + 4 * TAU) * 6 + 0.5f) / 6;   /* a slow open and close of its claws */
         if (stretch < 0) stretch = 0;
-        cr_pose_roost(p, settle, stretch, poke, fast_sin(t->clock * 0.9f + 4 * TAU) > 0.35f);
-        if (p->find) { p->fx = 0; p->fy = 14.6f; }                   /* (in at a run with it: held in front) */
+        cr_pose_roost(p, t->cr_find > 0 ? 0 : settle, stretch, poke, fast_sin(t->clock * 0.9f + 4 * TAU) > 0.35f);
+        if (t->cr_find > 0) {                                         /* the claws raised over its head, the coin between them (cr_draw_disc leaves the claws' px over its lower edge) */
+            const float fc[2][5] = { { -8.6f, 3.2f, 5.4f, 3.4f, -1 }, { 8.6f, 3.2f, 5.4f, 3.4f, 1 } };
+            memcpy(p->fclaw, fc, sizeof fc); p->open = 0; p->dy = 0;
+        }
         return;
     }
     /* the profile: strawberry_side.py pose() */
@@ -2792,7 +2821,8 @@ static void cr_pose(cr_pose_t *p, const tank_t *t) {
                                      { -1.5f, 12.0f, 0.0f, 13.5f, 1.5f, 17.5f, 1.0f, CR_FLOOR_SIDE - 0.5f, 0.0f },
                                      { -6.0f, 12.0f, -11.5f, 13.0f, -14.0f, 17.0f, -14.0f, CR_FLOOR_SIDE - 0.5f, 0.5f },
                                      { -10.0f, 11.5f, -17.5f, 11.5f, -21.0f, 15.5f, -21.5f, CR_FLOOR_SIDE - 0.5f, 0.0f } };
-    const bool walking = tank_crab_walking(t) && !(mode == CR_CLIMB && t->cr_climb >= 1 && t->cr_climb < 1 + 25.0f / 75.0f);
+    const bool nibble = mode == CR_CLIMB && t->cr_nibble > 0;      /* a stop on the flank, nibbling the rock (0.3.9.1) */
+    const bool walking = tank_crab_walking(t) && !nibble && !(mode == CR_CLIMB && t->cr_climb >= 1 && t->cr_climb < 1 + 25.0f / 75.0f);
     const float gait = floorf(fmodf(t->cr_gait, TAU) / TAU * 16) / 16 * TAU;   /* 16 steps a stride: the grid rebuilds on a step, not a frame */
     const bool resting = (mode == CR_REST || mode == CR_DIG) && !poke && !walking;
     float dy = walking ? 0.45f * fast_sin(gait * 2 + 4 * TAU) : resting ? 1.2f : 0.0f;
@@ -2800,8 +2830,8 @@ static void cr_pose(cr_pose_t *p, const tank_t *t) {
        `open`. A dig and a meal are one pick of CR_PICK_S: down with the jaws open, a pinch, a bite carried up to its
        face, and down again (Strato 10-23: the claw "didn't look quite right"); a groom lifts it empty */
     float L = walking ? 0.35f : 0.3f, open = 0; int bite = CRT_NONE;
-    if ((mode == CR_DIG || mode == CR_EAT) && !poke) {
-        float u = floorf(fmodf(t->cr_mode_s / CR_PICK_S, 1.0f) * 12) / 12;
+    if ((mode == CR_DIG || mode == CR_EAT || nibble) && !poke) {
+        float u = floorf(fmodf((nibble ? CR_NIBBLE_S - t->cr_nibble : t->cr_mode_s) / CR_PICK_S, 1.0f) * 12) / 12;
         if (u < 0.3f) { L = 1 - u / 0.3f; open = u >= 0.1f ? 1 : 0; }
         else if (u < 0.42f) { L = 0; open = u < 0.36f ? 0.5f : 0; }
         else if (u < 0.75f) { L = (u - 0.42f) / 0.33f; bite = mode == CR_EAT ? CRT_X : CRT_G; }
@@ -2928,14 +2958,6 @@ static int cr_cell(float px, float py, const cr_pose_t *p, int *part) {
             }
             *part = 10 + j;
         }
-    if (p->find) {                                                    /* the SAND DOLLAR: a gold disc, its five-petal mark, a glint that beats */
-        float ddx = px - p->fx, ddy = py - p->fy, e2 = ddx * ddx + ddy * ddy;
-        if (e2 <= 3.4f * 3.4f) {
-            tone = CRT_SD; *part = 13;
-            if (e2 < 0.5f || ((fabsf(ddx) < 0.55f || fabsf(ddy) < 0.55f) && e2 > 1.6f && e2 < 6.8f)) tone = CRT_SDD;   /* the mark: a dot, four spokes */
-            if (p->find == 2 && ddx > 0.9f && ddx < 2.1f && ddy < -0.9f && ddy > -2.1f) tone = CRT_W;                  /* the glint's beat */
-        }
-    }
         return tone;
     }
     /* the profile (strawberry_side.py crab_px): far legs, far claw, near legs, face, shell, eyes, the big claw */
@@ -2985,14 +3007,6 @@ static int cr_cell(float px, float py, const cr_pose_t *p, int *part) {
     }
     ct = cr_sclaw_tone(px, py, &p->claw, false);
     if (ct != CRT_NONE) { tone = ct; *part = 10; }
-    if (p->find) {                                                    /* the SAND DOLLAR: a gold disc, its five-petal mark, a glint that beats */
-        float ddx = px - p->fx, ddy = py - p->fy, e2 = ddx * ddx + ddy * ddy;
-        if (e2 <= 3.4f * 3.4f) {
-            tone = CRT_SD; *part = 13;
-            if (e2 < 0.5f || ((fabsf(ddx) < 0.55f || fabsf(ddy) < 0.55f) && e2 > 1.6f && e2 < 6.8f)) tone = CRT_SDD;   /* the mark: a dot, four spokes */
-            if (p->find == 2 && ddx > 0.9f && ddx < 2.1f && ddy < -0.9f && ddy > -2.1f) tone = CRT_W;                  /* the glint's beat */
-        }
-    }
     return tone;
 }
 /* the grid: every cell's tone, then its EDGES - a cell that borders the water
@@ -3041,14 +3055,58 @@ static uint32_t cr_hash(const cr_pose_t *p) {                        /* FNV-1a o
     for (size_t i = 0; i < sizeof *p; i++) { h ^= b[i]; h *= 16777619u; }
     return h ? h : 1;
 }
+/* the SAND DOLLAR it holds up (2026-10-24 evening, Strato at the glass after the first staged find: "it was so small
+ * ... nearly as big as the crab itself holding it above its head like the icon"): a gold disc the badge icon's size,
+ * two fifths of the crab's width, over its head between the raised claws and overlapping the top of its shell - drawn
+ * OUTSIDE the tone grid (25 rows end at its head), with its five-petal mark and the glint that beats twice a second.
+ * (0.3.9 as released held a 7 px disc in the right claw's jaws, inside the grid.) */
+#define CR_DISC_R     9.5f
+#define CR_DISC_UP    3.0f                       /* the disc's middle this far over the grid's top row: its lower edge between the raised claws */
+static inline bool cr_claw_tone(int tone) { return tone == CRT_L || tone == CRT_LD || tone == CRT_LK || tone == CRT_P || tone == CRT_Q || tone == CRT_O || tone == CRT_D; }
+/* tn: the crab's tone grid as blitted 1:1 at (cx_px, feet), or NULL - a claw's px in it stays over the coin: it HOLDS it */
+static void cr_draw_disc(ctx_t *c, const tank_t *t, float cx, float cy, float sc, const uint8_t *tn, int cx_px, int feet) {
+    const float r = CR_DISC_R * sc;
+    const int phase = ((int)(t->clock * 2)) & 1;
+    for (int y = (int)floorf(cy - r); y <= (int)ceilf(cy + r); y++) {
+        if (y < 0 || y >= TANK_H) continue;
+        const uint32_t w = water_rgb(y);
+        src_t gold = src_color(mix(w, CR_RGB[CRT_SD], CR_TINT), c->dim), dark = src_color(mix(w, CR_RGB[CRT_SDD], CR_TINT), c->dim), glint = src_color(CR_RGB[CRT_W], c->dim);
+        for (int x = (int)floorf(cx - r); x <= (int)ceilf(cx + r); x++) {
+            const float ddx = (x + 0.5f - cx) / sc, ddy = (y + 0.5f - cy) / sc, e2 = ddx * ddx + ddy * ddy;
+            if (e2 > CR_DISC_R * CR_DISC_R) continue;
+            const src_t *s = &gold;
+            if (e2 > (CR_DISC_R - 1.0f) * (CR_DISC_R - 1.0f)) s = &dark;                                              /* the rim */
+            else if (e2 < 1.3f) s = &dark;                                                                            /* the mark: a dot ... */
+            else if (e2 > 4.0f && e2 < 42.0f) {                                                                       /* ... and five petals */
+                const float a = atan2f(ddy, ddx), k = fmodf(a + 3.1415926f, 2 * 3.1415926f / 5);
+                if (fabsf(k - 3.1415926f / 5) < 0.14f) s = &dark;
+            }
+            if (phase && ddx > 2.2f && ddx < 5.0f && ddy < -2.2f && ddy > -5.0f && e2 < 30.0f) s = &glint;          /* the glint's beat */
+            if (tn) { const int gx = x - cx_px - CR_GX0, gy = y - feet + CR_GH - 1;
+                      if (gx >= 0 && gx < CR_GW && gy >= 0 && gy < CR_GH && cr_claw_tone(tn[gy * CR_GW + gx])) continue; }   /* the claw's px: over the coin */
+            px_blend_s(c, x, y, s, 255);
+        }
+    }
+}
 static void draw_crab(ctx_t *c, const tank_t *t) {
     if (!(t->sd_unlocks & SD_ITEM_CRAB) || t->cr_x < 0) return;
-    static uint32_t s_key = 0;
-    uint8_t *tn = ds()->cr_tones;
+    /* the grid is built only for a pose not drawn lately (0.3.9.1, C1704 on Discord: "lag when the crab walks" - the walk
+       rebuilt it on 60% of frames, a run on every one, a few ms each on the 1.8): the last CR_CACHE_N poses keep their
+       grids, and a walk cycles through 16 */
+    static uint32_t s_clock;
     const int mode = t->cr_mode;
     cr_pose_t p; cr_pose(&p, t);                                      /* cheap: no cell is computed here */
-    const uint32_t key = cr_hash(&p);                                 /* the grid is rebuilt only when the picture changes (cr_pose quantizes) */
-    if (key != s_key) { cr_build(tn, ds()->cr_parts, &p); s_key = key; }
+    const uint32_t key = cr_hash(&p);                                 /* (cr_pose quantizes: the same picture, the same key) */
+    decor_scratch_t *d = ds();
+    int slot = -1, old = 0;
+    for (int i = 0; i < CR_CACHE_N; i++) {
+        if (d->cr_keys[i] == key && !g_cr_nocache) { slot = i; break; }
+        if (d->cr_used[i] < d->cr_used[old]) old = i;
+    }
+    if (slot < 0) { slot = g_cr_nocache ? 0 : old; cr_build(d->cr_tones[slot], d->cr_parts, &p); d->cr_keys[slot] = key; g_cr_builds++; }
+    d->cr_used[slot] = ++s_clock;
+    const uint8_t *tn = d->cr_tones[slot];
+    g_cr_tn = tn;
     const int f = (t->cr_facing < 0 && mode != CR_ROOST) ? -1 : 1;
     const int feet = (int)floorf(CR_FLOOR_Y - t->cr_y);              /* the bottom row's y */
     /* backed into its shelter's dark (cr_back, tank.c: a motion in and out, never a switch): with it the crab draws
@@ -3079,6 +3137,7 @@ static void draw_crab(ctx_t *c, const tank_t *t) {
                 px_blend_s(c, x, y, &pal[tone], 255);
             }
         }
+        if (t->cr_find > 0) cr_draw_disc(c, t, cx, (float)(feet - CR_GH) - CR_DISC_UP, 1.0f, tn, cx, feet);   /* the sand dollar held up in both claws */
         return;
     }
     /* on the flank: (cr_x, its feet) is its FOOTING on the rock - the grid's (0, the bottom) - and the grid is
@@ -3109,13 +3168,18 @@ static void draw_crab(ctx_t *c, const tank_t *t) {
             px_blend_s(c, x, y, &pal[tone], 255);
         }
     }
+    if (t->cr_find > 0) cr_draw_disc(c, t, ox, oy - (CR_GH + CR_DISC_UP) * sc, sc, NULL, 0, 0);   /* the sand dollar over its head, scaled with it (never tilted: a find is a dig's) */
 }
 
-/* does the crab, as draw_crab painted it this frame (ds()->cr_tones: the grid of its last build), cover (x, y)?
+/* does the crab, as draw_crab painted it this frame (g_cr_tn: the grid it drew), cover (x, y)?
    The painter's two mappings run backwards: the 1:1 blit, or the sampler's rotation / scale about its feet. */
 static bool crab_covers(const tank_t *t, int x, int y) {
     if (!(t->sd_unlocks & SD_ITEM_CRAB) || t->cr_x < 0) return false;
     const int feet = (int)floorf(CR_FLOOR_Y - t->cr_y);
+    if (t->cr_find > 0) {                                             /* the sand dollar over its head */
+        const float ddx = x + 0.5f - t->cr_x, ddy = y + 0.5f - ((float)(feet - CR_GH) - CR_DISC_UP);
+        if (ddx * ddx + ddy * ddy <= CR_DISC_R * CR_DISC_R) return true;
+    }
     if (x < (int)t->cr_x - 36 || x > (int)t->cr_x + 36 || y < feet - 36 || y > feet + 36) return false;
     const int f = (t->cr_facing < 0 && t->cr_mode != CR_ROOST) ? -1 : 1;
     const float back = t->cr_back;
@@ -3132,7 +3196,12 @@ static bool crab_covers(const tank_t *t, int x, int y) {
         gx = (int)floorf(lx) - CR_GX0; gy = (int)floorf(ly) + CR_GH;
     }
     if (gx < 0 || gx >= CR_GW || gy < 0 || gy >= CR_GH) return false;
-    return ds()->cr_tones[gy * CR_GW + gx] != CRT_NONE;
+    return g_cr_tn && g_cr_tn[gy * CR_GW + gx] != CRT_NONE;
+}
+/* is (x, y) one of the front slot's critters' (g_guard_who), as painted this frame? */
+static bool slot_covers(int x, int y) {
+    return ((g_guard_who & GUARD_CRAB) && crab_covers(g_guard, x, y)) || ((g_guard_who & GUARD_SNAIL) && snail_covers(g_guard, x, y))
+        || ((g_guard_who & GUARD_URCHIN) && urchin_covers(g_guard, x, y));
 }
 
 /* ---- the seahorse (0.3.6; the prototype is working-assets/seahorse/
@@ -4137,7 +4206,7 @@ void render_tank(const tank_t *t, uint16_t *fb, int stride) {
          its front LANE on the sand (tank.h THE LANES; a dig is in front whatever the lane) - the front slot after
          the pieces IN FRONT are restored, FIRST in it so the snail and the urchin in their front lane pass in front
          of it (Strato, the 1.8), under the front fronds (which keep off the volcano's silhouette anyway); the
-         volcano's per-frame lava and embers keep off the crab (g_cr_guard in vo_store - Strato, the pendant);
+         volcano's per-frame lava and embers keep off the crab (g_guard in vo_store - Strato, the pendant);
        - cr_top: a sand dollar held up - over the fronds, so the keeper sees it wherever it dug;
        - else the critter pass with the snail and the urchin (its back lane on the sand). */
     const bool cr_in = (t->sd_unlocks & SD_ITEM_CRAB) && t->cr_x >= 0;
@@ -4262,7 +4331,7 @@ void render_tank(const tank_t *t, uint16_t *fb, int stride) {
     if (cr_in) {
         if (!cr_top && !cr_deep && !cr_slot) draw_crab(&c, t);
         const int feet = (int)floorf(CR_FLOOR_Y - t->cr_y);
-        if (t->cr_tilt == 0) DYN_RECT((int)t->cr_x - 27, feet - CR_GH, (int)t->cr_x + 27, feet + 1);
+        if (t->cr_tilt == 0) DYN_RECT((int)t->cr_x - 27, feet - CR_GH - (t->cr_find > 0 ? (int)(CR_DISC_UP + CR_DISC_R) + 1 : 0), (int)t->cr_x + 27, feet + 1);   /* (+ the sand dollar over its head) */
         else DYN_RECT((int)t->cr_x - 36, feet - 35, (int)t->cr_x + 36, feet + 36);
     }
     if (tank_snail_upright(t)) {
@@ -4335,8 +4404,11 @@ void render_tank(const tank_t *t, uint16_t *fb, int stride) {
               g_cst_clip = false;
           }
     }
-    g_cr_guard = cr_slot ? t : NULL;                          /* the crab in the front slot - in the front volcano's cave, on its flank, or digging / resting / walking
-                                                                  before it in its front lane: the lava's cells keep off it (Strato, the 1.8: a dig at the cave mouth) */
+    g_guard_who = (cr_slot ? GUARD_CRAB : 0u) | (tank_snail_upright(t) && snail_lane ? GUARD_SNAIL : 0u)
+                | ((t->sd_unlocks & SD_ITEM_URCHIN) && t->urchin_x >= 0 && urchin_lane ? GUARD_URCHIN : 0u);
+    g_guard = g_guard_who ? t : NULL;                        /* the front slot's critters - the crab in the front volcano's cave, on its flank, or digging / resting /
+                                                                  walking before it in its front lane; the snail and the urchin in theirs: the lava's cells keep off them
+                                                                  (Strato, the 1.8: a dig at the cave mouth; 0.3.9.1, the urchin walking past the cave) */
     for (int k = 0; k < g_npc; k++) {
         if (g_pc[k].z != DECOR_Z_FRONT) continue;
         g_clip_k = k;
@@ -4345,7 +4417,7 @@ void render_tank(const tank_t *t, uint16_t *fb, int stride) {
         else if (g_pc[k].item == 9) PC_VOLCANO(k);
         g_clip_k = -1;
     }
-    g_cr_guard = NULL;
+    g_guard = NULL; g_guard_who = 0;
     PROF_ADD(11, p0);                                /* the front pieces' overlays (crowns, the candle, the lava) */
     if ((t->sd_unlocks & SD_ITEM_SEAHORSE) && t->sh_x >= 0 && t->sh_front) draw_seahorse(&c, t);   /* the seahorse's front lane (its rect is marked above) */
     if (cr_top) draw_crab(&c, t);                                                                      /* the crab holding a find up; a page up: its front lane (its rect is marked above) */
@@ -4735,14 +4807,14 @@ static void crab_card_draw(ctx_t *c, const tank_t *t) {
             for (int yy = 0; yy < S; yy++) span(c, ox + gx * S, ox + gx * S + S - 1, oy + gy * S + yy, &sc, 255);
         }
     draw_text(c, X + (W - text_w("STRAWBERRY CRAB", 3)) / 2, Y + 70, 3, 0xffffff, "STRAWBERRY CRAB");
-    {   /* two counts side by side: the pellets it found, the sand dollars it dug up (0.3.9) */
+    {   /* two counts side by side: the pellets it found, the sand dollars it dug up (0.3.9) - what they paid, not how many finds (0.3.9.1) */
         const int L = X + W / 4, R = X + 3 * W / 4;
         char n[16];
         draw_text(c, L - text_w("PELLETS", 2) / 2, Y + 104, 2, 0x9fd8e2, "PELLETS");
         if (t->cr_eaten == 0) snprintf(n, sizeof n, "NONE YET"); else snprintf(n, sizeof n, "%u", (unsigned)t->cr_eaten);
         draw_text(c, L - text_w(n, 3) / 2, Y + 126, 3, 0xffffff, n);
         draw_text(c, R - text_w("SAND DOLLARS", 2) / 2, Y + 104, 2, 0x9fd8e2, "SAND DOLLARS");
-        if (t->cr_found == 0) snprintf(n, sizeof n, "NONE YET"); else snprintf(n, sizeof n, "%u", (unsigned)t->cr_found);
+        if (t->cr_found == 0) snprintf(n, sizeof n, "NONE YET"); else snprintf(n, sizeof n, "%u", SD_CRAB_FINDS_VALUE(t->cr_found));
         draw_text(c, R - text_w(n, 3) / 2, Y + 126, 3, 0xffffff, n);
     }
     const char *now = t->cr_find > 0 ? "FOUND A SAND DOLLAR!"
@@ -5311,6 +5383,9 @@ void render_battery_info(uint16_t *fb, int stride, const bat_info_t *bi, float c
 /* (the page's numbers, MSP_*: render.h) */
 #define MSP_INK       0x031015
 #define MSP_DIM       0x2a3f45
+#define MSP_QUIET     0x7f9aa1      /* quiet TEXT on the panels: a price out of reach, YOU HAVE, the settings' notes (0.3.9.1, Machito on Discord: MSP_DIM text
+                                         "nearly impossible" to read, worse with the brightness down). ~6:1 on the panel; white and teal stay brighter.
+                                         MSP_DIM stays for shapes: dividers, the dots, the silhouettes */
 #define MSP_TEAL      0x9fd8e2
 
 typedef struct { uint32_t bit; const icon_t *icon; } badge_t;
@@ -5604,9 +5679,9 @@ void render_milestones(const tank_t *t, uint16_t *fb, int stride) {
     }
     /* the way out: a CLOSE button in the prompt's calm dress (a tap anywhere
        else never drops the page - too much to tap for that) */
-    button(&c, MSP_CLOSE_X, MSP_CLOSE_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CLOSE", 2);
-    button(&c, MSP_UPG_X, MSP_CLOSE_Y, MSP_UPG_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "UPGRADES", 2);   /* the shop: bottom left (the bowl: left of CLOSE) */
-    button(&c, MSP_SET_X, MSP_SET_Y, MSP_SET_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "SETTINGS", 2);   /* between them (Strato, 2026-10-24: swapped with
+    button(&c, MSP_FOOT_CLOSE_X, MSP_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CLOSE", 2);   /* (the foot: render.h MSP_FOOT_Y, pinned to the bottom) */
+    button(&c, MSP_FOOT_UPG_X, MSP_FOOT_Y, MSP_UPG_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "UPGRADES", 2);   /* the shop: bottom left (the bowl: left of CLOSE) */
+    button(&c, MSP_FOOT_SET_X, PAGE_BOWL ? MSP_SET_Y : MSP_FOOT_Y, MSP_SET_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "SETTINGS", 2);   /* between them (Strato, 2026-10-24: swapped with
                                                                                                         UPGRADES, bottom left since 2026-09-15; the bowl's sits in the cap) */
     /* a modal up: the page under it is out of reach (any tap only closes the
        modal), so it LOOKS out of reach - every pixel at half (Strato: with
@@ -5656,7 +5731,7 @@ void render_milestones(const tank_t *t, uint16_t *fb, int stride) {
             if (!progression_fish_sellable(t, g_ms_row)) {           /* not for sale: the button in the page's dim ink, the words too */
                 rect_fill(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x04141a);
                 rect_edge(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, MSP_DIM);
-                draw_text(&c, ms_card_btn_x(1) + (MSP_CARD_BTN_W - text_w("SELL", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_DIM, "SELL");
+                draw_text(&c, ms_card_btn_x(1) + (MSP_CARD_BTN_W - text_w("SELL", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_QUIET, "SELL");
             } else if (g_ms_sell_armed) {
                 char ok[16]; snprintf(ok, sizeof ok, "+%d OK?", progression_fish_value(t, g_ms_row));
                 button(&c, ms_card_btn_x(1), by, MSP_CARD_BTN_W, MSP_HOW_H, 0x155e58, 0x38dcc7, ok, 2);
@@ -5724,11 +5799,11 @@ int render_milestones_tap(const tank_t *t, float x, float y) {
     }
 #ifdef TANK_ROUND                                    /* the bowl: SETTINGS has the cap above the rows; the foot is UPGRADES | CLOSE */
     if (y < MSP_SET_Y + MSP_CLOSE_H + 14) return x >= MSP_SET_X - 24 && x < MSP_SET_X + MSP_SET_W + 24 ? MS_TAP_SETTINGS : MS_TAP_NONE;
-    if (y >= MSP_CLOSE_Y - 4) return x >= MSP_CLOSE_X - 6 ? MS_TAP_CLOSE : MS_TAP_SHOP;
+    if (y >= MSP_FOOT_HIT_Y) return x >= MSP_FOOT_CLOSE_X - 6 ? MS_TAP_CLOSE : MS_TAP_SHOP;
 #else
-    if (x >= MSP_CLOSE_X - 8 && y >= MSP_CLOSE_Y - 4) return MS_TAP_CLOSE;      /* slop out to the glass edge */
-    if (x < MSP_UPG_X + MSP_UPG_W + 8 && y >= MSP_CLOSE_Y - 4) return MS_TAP_SHOP;       /* UPGRADES, bottom left: the shop */
-    if (y >= MSP_CLOSE_Y - 4) return MS_TAP_SETTINGS;                                    /* SETTINGS: the rest of the strip (2026-10-24: the two swapped) */
+    if (x >= MSP_FOOT_CLOSE_X - MSP_FOOT_SLOP && y >= MSP_FOOT_HIT_Y) return MS_TAP_CLOSE;           /* slop out to the glass edge */
+    if (x < MSP_FOOT_UPG_X + MSP_UPG_W + MSP_FOOT_SLOP && y >= MSP_FOOT_HIT_Y) return MS_TAP_SHOP;  /* UPGRADES, bottom left: the shop */
+    if (y >= MSP_FOOT_HIT_Y) return MS_TAP_SETTINGS;                                     /* SETTINGS: the rest of the strip (2026-10-24: the two swapped) */
 #endif
     int row = -1; bool tank_row = false, fry_row = false;
     fry_req_t req[FRY_REQ_MAX]; bool staged;
@@ -5738,7 +5813,7 @@ int render_milestones_tap(const tank_t *t, float x, float y) {
         if (row < 0) row = 0;
         if (row == t->n_fish && nreq > 0) fry_row = true;   /* the NEW FRY row */
         else if (row >= t->n_fish) return MS_TAP_NONE;      /* an empty row */
-    } else if (y >= MSP_TANK_Y - 6 && y < MSP_CLOSE_Y - 4) tank_row = true;   /* down to the button strip: fingers near the
+    } else if (y >= MSP_TANK_Y - 6 && y < MSP_FOOT_HIT_Y) tank_row = true;    /* down to the button strip: fingers near the
                                                                               bottom bezel report LOW */
     else return MS_TAP_NONE;
     if (tank_row && x >= MSP_TPG_X && tank_pages(t) > 1) {   /* the page arrow: the next page, wrapping */
@@ -5814,7 +5889,7 @@ static int ms_open(const tank_t *t, int row, bool tank_row, bool fry_row, int k,
    treat the release as they did before). */
 bool render_milestones_swipe(const tank_t *t, float x, float y, float dx) {
     (void)x; y -= PAGE_Y;
-    if (g_ms_caption[0] || tank_pages(t) < 2 || y < MSP_TANK_Y - 6 || y >= MSP_CLOSE_Y - 4) return false;
+    if (g_ms_caption[0] || tank_pages(t) < 2 || y < MSP_TANK_Y - 6 || y >= MSP_FOOT_HIT_Y) return false;
     int p = g_ms_tpage + (dx < 0 ? 1 : -1);
     if (p >= 0 && p < tank_pages(t)) g_ms_tpage = p;
     return true;
@@ -5989,8 +6064,8 @@ static void shop_fry_row(ctx_t *c, const tank_t *t, uint16_t *fb, int stride, in
     bool room = progression_fry_room(t), can = t->sd_balance >= SD_PRICE_FRY;
     if (k >= 0) { fry_offer_t o; progression_fry_offer(k, &o); fry_draw(fb, stride, 48, top + 16, 0.9f, &o, t->clock); }
     draw_text(c, 76, top + 2, 2, 0xffffff, "FRY");
-    if (k < 0) { char l[24]; fry_hours(l, sizeof l); draw_text(c, 76, top + 20, 2, MSP_DIM, l); }
-    else price_tag(c, 76, top + 20, SD_PRICE_FRY, can && room ? MSP_TEAL : MSP_DIM);
+    if (k < 0) { char l[24]; fry_hours(l, sizeof l); draw_text(c, 76, top + 20, 2, MSP_QUIET, l); }
+    else price_tag(c, 76, top + 20, SD_PRICE_FRY, can && room ? MSP_TEAL : MSP_QUIET);
     const char *b = k < 0 ? "SOLD OUT" : !room ? "FULL" : "CHOOSE";
     if (k >= 0 && room && can) { button(c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, b, 2);
                                  draw_text(c, SHP_BTN_X + (SHP_BTN_W - text_w(b, 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, b); }
@@ -6020,13 +6095,13 @@ static void shop_fry_modal(ctx_t *c, const tank_t *t, uint16_t *fb, int stride) 
     fry_offer_t pk; progression_fry_offer(g_shp_fry_pick, &pk);
     bool go = room && can && !pk.sold && progression_fry_left() > 0;
     char line[32]; snprintf(line, sizeof line, "%d", SD_PRICE_FRY);
-    price_tag(c, X + (W - 20 - text_w(line, 2)) / 2, Y + 138, SD_PRICE_FRY, go ? 0xffffff : MSP_DIM);
+    price_tag(c, X + (W - 20 - text_w(line, 2)) / 2, Y + 138, SD_PRICE_FRY, go ? 0xffffff : MSP_QUIET);
     if (!room) snprintf(line, sizeof line, t->n_fish >= POP_CAP ? "THE TANK IS FULL" : "WELCOME THE NEW FRY");
     else if (!can) snprintf(line, sizeof line, "YOU HAVE %d", (int)t->sd_balance);
     else line[0] = 0;
-    if (line[0]) draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 160, 2, MSP_DIM, line);
+    if (line[0]) draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 160, 2, MSP_QUIET, line);
     fry_hours(line, sizeof line);
-    draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 180, 2, 0x3f6a72, line);
+    draw_text(c, X + (W - text_w(line, 2)) / 2, Y + 180, 2, MSP_QUIET, line);
     const int bx = X + (W - MSP_HOW_W) / 2, by = Y + H - 12 - MSP_HOW_H;
     if (go) { button(c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "BUY", 2);
               draw_text(c, bx + (MSP_HOW_W - text_w("BUY", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "BUY"); }
@@ -6150,7 +6225,7 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
         draw_text(&c, 76, top + 2, 2, 0xffffff, it->name);
         if (shelved) draw_text(&c, 76, top + 20, 2, MSP_TEAL, "ON THE SHELF");
         else if (owned) draw_text(&c, 76, top + 20, 2, MSP_TEAL, "IN THE TANK");
-        else price_tag(&c, 76, top + 20, it->price, can ? MSP_TEAL : MSP_DIM);
+        else price_tag(&c, 76, top + 20, it->price, can ? MSP_TEAL : MSP_QUIET);
         if (shelved) { button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_TEAL, MSP_TEAL, "PUT BACK", 2);          /* live: one tap returns it */
                        draw_text(&c, SHP_BTN_X + (SHP_BTN_W - text_w("PUT BACK", 2)) / 2, top + (SHP_BTN_H - 14) / 2, 2, MSP_INK, "PUT BACK"); }
         else if (owned) button(&c, SHP_BTN_X, top, SHP_BTN_W, SHP_BTN_H, MSP_INK, MSP_DIM, "IN TANK", 2);
@@ -6171,7 +6246,7 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
         draw_text(&c, X + (W - text_w("HOW TO EARN", 3)) / 2, Y + 14, 3, 0xffffff, "HOW TO EARN");
         const char *const *lines = progression_sd_earn_lines();
         for (int i = 0; lines[i]; i++) draw_text(&c, X + 14, Y + 50 + i * 24, 2, MSP_TEAL, lines[i]);
-        draw_text(&c, X + (W - text_w("TAP TO CLOSE", 2)) / 2, Y + H - 24, 2, 0x3f6a72, "TAP TO CLOSE");
+        draw_text(&c, X + (W - text_w("TAP TO CLOSE", 2)) / 2, Y + H - 24, 2, MSP_QUIET, "TAP TO CLOSE");
         return;
     }
     if (g_shp_modal == SHP_MODAL_FRY) { shop_fry_modal(&c, t, fb, stride); return; }
@@ -6190,7 +6265,7 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
         if (shelved) shelf_slot(&c, X + (W - 64) / 2, Y + 14, t, g_shp_modal, 2);   /* over the icon: the piece as it is on the shelf */
         const char *state = shelved ? "ON THE SHELF" : "IN THE TANK";
         draw_text(&c, X + (W - text_w(state, 2)) / 2, Y + 164, 2, MSP_TEAL, state);
-        if (shelf_line(t, g_shp_modal, sub, sizeof sub)) draw_text(&c, X + (W - text_w(sub, 2)) / 2, Y + 184, 2, MSP_DIM, sub);
+        if (shelf_line(t, g_shp_modal, sub, sizeof sub)) draw_text(&c, X + (W - text_w(sub, 2)) / 2, Y + 184, 2, MSP_QUIET, sub);
         button(&c, SHP_TWO_X0, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, shelved ? "PLACE" : "MOVE", 2);
         if (!shelved) button(&c, SHP_TWO_X1, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_TEAL, "SHELVE", 2);
         else if (g_shp_sell_armed) { snprintf(sub, sizeof sub, "+%d OK?", progression_sell_value(g_shp_modal));
@@ -6201,9 +6276,9 @@ void render_shop(const tank_t *t, uint16_t *fb, int stride) {
     else {
         char line[32]; snprintf(line, sizeof line, "%d", it->price);
         int pw = 20 + text_w(line, 2);
-        price_tag(&c, X + (W - pw) / 2, Y + 164, it->price, can ? 0xffffff : MSP_DIM);
+        price_tag(&c, X + (W - pw) / 2, Y + 164, it->price, can ? 0xffffff : MSP_QUIET);
         if (!can) { snprintf(line, sizeof line, "YOU HAVE %d", (int)t->sd_balance);
-                    draw_text(&c, X + (W - text_w(line, 2)) / 2, Y + 184, 2, MSP_DIM, line); }
+                    draw_text(&c, X + (W - text_w(line, 2)) / 2, Y + 184, 2, MSP_QUIET, line); }
         if (can) { button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, MSP_TEAL, MSP_TEAL, "UNLOCK", 2);
                    draw_text(&c, bx + (MSP_HOW_W - text_w("UNLOCK", 2)) / 2, by + (MSP_HOW_H - 14) / 2, 2, MSP_INK, "UNLOCK"); }
         else button(&c, bx, by, MSP_HOW_W, MSP_HOW_H, 0x1c2f36, MSP_DIM, "UNLOCK", 2);
@@ -6374,7 +6449,7 @@ void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, 
     draw_text(&c, (PAGE_W - text_w("SETTINGS", 3)) / 2, SET_TITLE_Y, 3, 0xffffff, "SETTINGS");
     set_slider(&c, SET_ROW1_Y, bright_pct);
     set_row(&c, SET_ROW2_Y, "VOLUME", SET_VOLUME, 3, volume < 0 ? 0 : volume > 2 ? 2 : volume);
-    draw_text(&c, SET_LABEL_X, SET_NOTE_Y, 2, MSP_DIM, "FISH ARE QUIET AT NIGHT");
+    draw_text(&c, SET_LABEL_X, SET_NOTE_Y, 2, MSP_QUIET, "FISH ARE QUIET AT NIGHT");
     /* LIGHTS OUT: < the choice > */
     {
         int ch = tank_light_choice(t), y = SET_SEG_Y(SET_ROW3_Y);
@@ -6390,7 +6465,7 @@ void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, 
     /* SCREEN (2026-10-02): the way up of a watch worn either way round - TURNED
        for buttons toward the elbow. The picture turns as the finger lifts. */
     set_row(&c, SET_ROW5_Y, "SCREEN", SET_SCREEN, 2, t->screen_turned ? 1 : 0);
-    draw_text(&c, SET_LABEL_X, SET_NOTE5_Y, 2, MSP_DIM, "WORN THE OTHER WAY AROUND?");
+    draw_text(&c, SET_LABEL_X, SET_NOTE5_Y, 2, MSP_QUIET, "WORN THE OTHER WAY AROUND?");
 #else
     /* ROTATION (0.3.2): the picture turns over with the tank, unless locked */
     {
@@ -6399,7 +6474,7 @@ void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, 
         if (t->orient_lock) button(&c, x, y, SET_SEG_W, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
         else                button(&c, x, y, SET_SEG_W, SET_SEG_H, 0x1c2f36, MSP_DIM, "", 2);
         set_lock_icon(&c, x + SET_SEG_W / 2, y + SET_SEG_H / 2 + 1, t->orient_lock, t->orient_lock ? MSP_INK : MSP_TEAL);
-        draw_text(&c, SET_ROT_WORD_X, SET_ROW5_Y, 2, t->orient_lock ? 0xffffff : MSP_DIM, t->orient_lock ? "LOCKED" : "UNLOCKED");
+        draw_text(&c, SET_ROT_WORD_X, SET_ROW5_Y, 2, t->orient_lock ? 0xffffff : MSP_QUIET, t->orient_lock ? "LOCKED" : "UNLOCKED");
     }
 #endif
     /* the firmware version, hugging the bottom left of the frame (6 px up,

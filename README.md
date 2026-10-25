@@ -381,10 +381,14 @@ glow on the water and the sand. BEHIND or IN FRONT, like the castle.
 crab with white spots that lives on the sand. It strolls, digs, eats the
 pellets that reach the floor, naps in the castle's arch or the volcano's
 cave, and comes out more with the light off. Tap it for its card; three
-quick raps send it running for cover. Now and then a dig turns up a sand
-dollar and it holds it up for a minute: tap it to take it, 10 sand dollars
-the first time and 20 every time after. The crab, the urchin and the snail
-wander in front of your decorations as often as behind them.
+quick raps send it running for cover. When the shrimp crowd a pellet it
+wants, it raises its claws and they scatter; after three pellets it is
+full for a while. Now and then a dig turns up a sand dollar. The find
+waits for you - the light on and the tank touched in the last few minutes -
+and the crab holds it up in both claws for three minutes, with a sound:
+tap it to take it, 10 sand dollars the first time and 20 every time after.
+The crab, the urchin and the snail wander in front of your decorations as
+often as behind them.
 
 **The shelf, and the lock.** Since 0.3.9 anything you can move you can
 also put away: SHELVE on a piece's page or in its shop panel, and it waits

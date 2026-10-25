@@ -202,7 +202,7 @@ static void help(void) {
     ESP_LOGI(TAG, "STAGED TANKS (the real one is parked first): fresh (new tank, two fry) | stages (fry juv adult elder) | stage <fish|all> <fry|juv|adult|elder>");
     ESP_LOGI(TAG, "stash (park the real tank now) | restore (bring it back) | age <fish> <hours>");
     ESP_LOGI(TAG, "milestones [off] (the page, on cue; on the device: tap the open stats card)");
-    ESP_LOGI(TAG, "crab [x <px> | roost [castle|volcano] | tap | scare | find] (the strawberry crab, 0.3.9: where it is and what it is doing; set it down; send it to roost now; claws up; three taps - it runs for cover; find = it digs up a sand dollar within seconds)");
+    ESP_LOGI(TAG, "crab [x <px> | roost [castle|volcano] | tap | scare | find | shoo [gap [n]]] (the strawberry crab, 0.3.9: where it is and what it is doing; set it down; send it to roost now; claws up; three taps - it runs for cover; find = it digs up a sand dollar within seconds; shoo = a pellet gap px off (45; n = a cluster of 1..4), the shrimp on it, the crab going for it - near enough it shoos them, from far off they win)");
     ESP_LOGI(TAG, "fry [open|roll|buy <0-2>] (the shop's fry: open = as if a fish was sold; roll = a fresh three now)");
     ESP_LOGI(TAG, "shop [off] (the sand dollar page) | dollars [n] (grant n; the balance and the chore counts) | buy plant|snail|castle|coral|cluster|shrimp|urchin|seahorse (at the price) | seahorse on|off (drawn or not: the fps A/B) | place [plant|castle|coral] [x [behind|among|front]] (the piece's spot; no x = the page; the castle has no among) | coral <0-7|rrggbb> (its colour) | coral grow <g> (its growth, 1 = the fan, 1.25 = the crown) | cluster look <0-2> | cluster grow <g> (1 = full size, 2 = every tentacle) | sell plant|castle|coral|cluster (20%% back) | shelve|unshelve <piece> | lock|unlock <piece> (a held finger passes a locked piece by)");
     ESP_LOGI(TAG, "reset (the keeper's confirm prompt, as BOOT + tap opens it) | reset yes|no (answer it here) - YES WIPES EVERY SAVE, a parked tank too");
@@ -374,7 +374,7 @@ static void run(tank_t *t, char *line) {
                                                     tank_decor_placeable(item) ? " (`place` opens the placement page)" : "");
         else ESP_LOGW(TAG, "%s refused: owned, not sold by this build, or %d < %d", SD_ITEMS[item].name, (int)t->sd_balance, SD_ITEMS[item].price);
     } else if (!strcmp(c, "crab")) {                 /* crab [x <px> | roost [castle|volcano] | tap | scare]: the strawberry crab (0.3.9) - set it down, send it to roost now, poke it, scare it */
-        static const char *const M[] = { "resting", "walking", "digging", "heading for a shelter", "roosting", "going for food", "eating", "climbing" };
+        static const char *const M[] = { "resting", "walking", "digging", "heading for a shelter", "roosting", "going for food", "eating", "climbing" };   /* (climbing + cr_nibble: nibbling the rock) */
         if (!(t->sd_unlocks & SD_ITEM_CRAB) || t->cr_x < 0) ESP_LOGW(TAG, "no crab in the tank (`buy crab`)");
         else {
             if (argc > 2 && !strcmp(argv[1], "x")) { t->cr_x = (float)atof(argv[2]); t->cr_y = 0; t->cr_tilt = 0; t->cr_mode = CR_REST; t->cr_mode_s = 0; t->cr_timer = 20; t->cr_cave = -1; }
@@ -382,11 +382,14 @@ static void run(tank_t *t, char *line) {
                 int cave = argc > 2 ? (!strcmp(argv[2], "castle") ? 2 : !strcmp(argv[2], "volcano") ? 9 : -1) : -1;
                 if (!tank_crab_roost(t, cave)) ESP_LOGW(TAG, "crab: no %s in the water to roost in (or it is climbing)", argc > 2 ? argv[2] : "castle or volcano");
             } else if (argc > 1 && !strcmp(argv[1], "tap")) tank_crab_tap(t, t->cr_x + 20);
+            else if (argc > 1 && !strcmp(argv[1], "climb")) { if (!tank_crab_climb(t)) ESP_LOGW(TAG, "crab: no volcano in the water to climb (or no crab, or it is climbing)"); }
             else if (argc > 1 && !strcmp(argv[1], "scare")) tank_crab_scare(t, t->cr_x + 20);
-            else if (argc > 1 && !strcmp(argv[1], "find")) { t->cr_find_cool = 0; t->cr_y = 0; t->cr_tilt = 0; t->cr_cave = -1; t->cr_mode = CR_DIG; t->cr_mode_s = 0; t->cr_timer = 60; t->cr_find = 0; }   /* the next pick comes up with it */
-            ESP_LOGI(TAG, "crab: %s at x %.0f (floor %.0f..%.0f), facing %s%s%s", t->cr_mode < 8 ? M[t->cr_mode] : "?", t->cr_x, (double)TANK_FX0, (double)TANK_FX1,
+            else if (argc > 1 && !strcmp(argv[1], "shoo")) { if (!tank_crab_pellet_race(t, argc > 2 ? (float)atof(argv[2]) : 45.0f, argc > 3 ? atoi(argv[3]) : 1)) ESP_LOGW(TAG, "crab: no room for a pellet (or it is climbing)"); }   /* 0.3.9.1: the race for a pellet */
+            else if (argc > 1 && !strcmp(argv[1], "find")) { t->cr_find_cool = 0; t->cr_y = 0; t->cr_tilt = 0; t->cr_cave = -1; t->cr_mode = CR_DIG; t->cr_mode_s = 0; t->cr_timer = 60; t->cr_find = 0; tank_handled(t); }   /* the next pick comes up with it (0.3.9.1: the keeper "here"; the light must be on) */
+            ESP_LOGI(TAG, "crab: %s at x %.0f (floor %.0f..%.0f), facing %s%s%s", t->cr_mode == CR_CLIMB && t->cr_nibble > 0 ? "climbing, nibbling the rock" : t->cr_mode < 8 ? M[t->cr_mode] : "?", t->cr_x, (double)TANK_FX0, (double)TANK_FX1,
                      t->cr_facing > 0 ? "right" : "left", t->cr_cave == 2 ? ", the castle" : t->cr_cave == 9 ? ", the volcano" : "", t->cr_find > 0 ? ", HOLDING A SAND DOLLAR (tap it)" : t->cr_poke > 0 ? ", claws up" : t->cr_scurry ? ", running" : t->cr_hide > 0 ? ", hiding in the dark" : "");
-            ESP_LOGI(TAG, "crab: %u pellets found, %u sand dollars dug up (%u paid), next find in %.0f min of awake time", (unsigned)t->cr_eaten, (unsigned)t->cr_found, (unsigned)t->cr_found_paid, t->cr_find_cool / 60);
+            if (t->cr_full > 0) ESP_LOGI(TAG, "crab: full - fallen pellets do not tempt it for %.0f s more", t->cr_full);
+            ESP_LOGI(TAG, "crab: %u pellets found, %u sand dollars dug up (%u paid), next find due in %.0f min of lived time (then it waits for the keeper: the light on, a touch in the last 5 min)", (unsigned)t->cr_eaten, (unsigned)t->cr_found, (unsigned)t->cr_found_paid, t->cr_find_cool / 60);
             if (tank_decor_in(t, 2)) ESP_LOGI(TAG, "crab: the castle's arch is at x %.0f", tank_decor_x(t, 2));
             if (tank_decor_in(t, 9)) ESP_LOGI(TAG, "crab: the volcano's cave is at x %.0f", tank_decor_x(t, 9));
         }
