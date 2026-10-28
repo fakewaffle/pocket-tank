@@ -8,7 +8,9 @@
  *                          the window counts too - still 15 s = lights out, once
  *                          settings has LIGHTS OUT on AUTO; MANUAL is the default),
  *                          L brain, U overlays, M milestones view,
- *                          X reset prompt (device: hold BOOT + tap the glass),
+ *                          X reset prompt (device: hold BOOT 5 s, then tap the glass),
+ *                          0 BOOT: held 5 s then a click = the reset prompt, or on the
+ *                          settings page the hidden ADVANCED page (0.3.9.2),
  *                          S the first-run setup flow (welcome / names / colours),
  *                          R force an arrival (the birth flow opens: announce /
  *                          name / family; S drops it), A auto-light, Q quit,
@@ -25,6 +27,8 @@
  *                          3 quick taps = startle; 2 taps = the light, in
  *                          settings' MANUAL mode, the default)
  *   ./fishsim --fresh      ignore the save (new tank: random pair)
+ *   ./fishsim --zoom N     the window at N x the glass (whole pixels, 1..8)
+ *   ./fishsim --fullscreen fill the desktop at the biggest whole-pixel zoom (bars around it)
  *   ./fishsim --fast N     tended time runs N x faster (stages, drift)
  *   ./fishsim --battery N  the pretend battery starts at N% (default 72)
  *   ./fishsim --greedy     greedy decoding instead of sampling
@@ -32,6 +36,7 @@
  *   ./fishsim --selftest-llm [min]   headless LLM path (real-time if min > 0)
  *   ./fishsim --selftest-model [pfx] a damaged AI model tells the keeper (pfx: also the card as a PPM)
  *   ./fishsim --selftest-pop         headless population/arrival/save check
+ *   ./fishsim --selftest-advanced    headless ADVANCED page (0.3.9.2): battery sizes + the warning gate, touch calibration + its check
  *   ./fishsim --selftest-card [pfx]  headless fish card: RENAME and SELL (pfx: also writes its pages as PPMs)
  *   ./fishsim --selftest-fry [pfx]   headless fry for sale (0.3.5): the first sale, the offer, buying, the day, the save
  *   ./fishsim --selftest-sleep       headless sleep metabolism + ravenous begging
@@ -75,6 +80,7 @@
 #include "notice.h"
 #include "tank_events.h"
 #include "update.h"
+#include "advanced.h"
 void net_sim_advance(float dt);    /* net_port_sim.c: the pretend radio's clock */
 bool net_sim_radio_on(void);
 
@@ -1362,6 +1368,152 @@ static int selftest_saves(void) { printf("selftest-saves: not in the MSVC build 
  * the download, the restart - then the saved network's short path, a wrong
  * password (the store is dropped), no signal, up to date, needs the cable,
  * the battery gate, CANCEL mid-download, NOT NOW. */
+/* --selftest-advanced (0.3.9.2): the hidden ADVANCED page. The battery: every
+ * size charges inside the charger's range and never past ADV_CHARGE_MAX, the
+ * board's own cell at its own rate, bigger never slower; a faster size goes
+ * through the warning (taps ignored for its first 2 s, CONTINUE dead until the
+ * box is ticked, CANCEL keeps the old size); a slower one applies at once.
+ * The touch map: a panel's stretch recovered upright and turned over, scatter
+ * refused; the page's sitting with a stretched pretend panel, the check
+ * passing through the new map, the check timing out (the old map back), a
+ * scattered sitting refused, RESET TOUCH. Targets are found by asking the
+ * page's own hit tests, never a literal pixel. */
+static bool adv_find(int (*hit)(float, float), int want, float *fx, float *fy) {
+    for (int y = 0; y < TANK_H; y += 3) for (int x = 0; x < TANK_W; x += 3)
+        if (hit((float)x, (float)y) == want) {          /* the middle of the run of hits on this row */
+            int x1 = x; while (x1 + 3 < TANK_W && hit((float)(x1 + 3), (float)y) == want) x1 += 3;
+            *fx = (x + x1) / 2.0f; *fy = y + 10.0f; if (hit(*fx, *fy) != want) *fy = (float)y;
+            return true;
+        }
+    return false;
+}
+static int adv_hit_main(float x, float y) { return render_advanced_tap(x, y); }
+static int adv_hit_warn(float x, float y) { return render_battery_warning_tap(x, y); }
+static int adv_hit_intro_own(float x, float y) { return render_touch_intro_tap(x, y, true); }
+static int adv_hit_intro(float x, float y) { return render_touch_intro_tap(x, y, false); }
+static int adv_tap(float x, float y, bool turned) { adv_touch(x, y, true, turned); return adv_touch(x, y, false, turned); }
+static int adv_tap_hit(int (*hit)(float, float), int want) {
+    float x, y; if (!adv_find(hit, want, &x, &y)) { printf("FAIL: advanced: no place on the page hits %d\n", want); exit(1); }
+    return adv_tap(x, y, false);
+}
+/* a pretend panel that reads stretched: where it reports a finger on the picture's (tx, ty), upright frame */
+#define PANEL_GX 1.06f
+#define PANEL_OX (-14.0f)
+#define PANEL_GY 0.95f
+#define PANEL_OY 9.0f
+static void adv_panel(float tx, float ty, bool turned, int k, float *px, float *py) {
+    float ux = turned ? TANK_W - 1 - tx : tx, uy = turned ? TANK_H - 1 - ty : ty;
+    ux = PANEL_GX * ux + PANEL_OX + (float)((k * 7) % 5 - 2); uy = PANEL_GY * uy + PANEL_OY + (float)((k * 3) % 5 - 2);   /* +-2 px of a finger's scatter */
+    *px = turned ? TANK_W - 1 - ux : ux; *py = turned ? TANK_H - 1 - uy : uy;
+}
+static int selftest_advanced(void) {
+    #define AFAIL(...) do { printf("FAIL: advanced: "); printf(__VA_ARGS__); printf("\n"); return 1; } while (0)
+    /* the battery's table */
+    const int *sz; int n = adv_cell_sizes(&sz), prev = 0, n_fast = 0;
+    if (!adv_cell_ok(ADV_CELL_STOCK) || adv_charge_ma(ADV_CELL_STOCK) != ADV_CHARGE_STOCK) AFAIL("the board's own cell (%d mAh) does not charge at its own %d mA", ADV_CELL_STOCK, ADV_CHARGE_STOCK);
+    printf("selftest-advanced: battery sizes (mAh -> mA, end of charge):");
+    for (int i = 0; i < n; i++) {
+        int c = adv_charge_ma(sz[i]), t = adv_trickle_ma(sz[i]);
+        printf(" %d->%d/%d%s", sz[i], c, t, adv_cell_fast(sz[i]) ? "!" : "");
+        if (c < 25 || c > ADV_CHARGE_MAX || (c <= 200 ? c % 25 : c % 100)) AFAIL("%d mAh charges at %d mA, not a step the charger has inside 25..%d", sz[i], c, ADV_CHARGE_MAX);
+        if (c > sz[i]) AFAIL("%d mAh charges at %d mA: past 1 C", sz[i], c);
+        if (c < prev) AFAIL("%d mAh charges slower (%d mA) than the size before it (%d)", sz[i], c, prev);
+        if (t < 25 || t > 200 || t % 25 || t >= c + 1) AFAIL("%d mAh ends its charge at %d mA (charge %d)", sz[i], t, c);
+        if (adv_cell_fast(sz[i]) != (c > ADV_CHARGE_STOCK)) AFAIL("%d mAh: the warning flag disagrees with its rate", sz[i]);
+        if (adv_cell_fast(sz[i]) && sz[i] <= ADV_CELL_STOCK) AFAIL("%d mAh, no bigger than the board's own, would charge faster", sz[i]);
+        n_fast += adv_cell_fast(sz[i]); prev = c;
+    }
+    printf("  (! = the warning first)\n");
+    /* the map's arithmetic: a stretched panel recovered, upright and turned over */
+    for (int turned = 0; turned < 2; turned++) {
+        float tx[ADV_N_CROSS], ty[ADV_N_CROSS], px[ADV_N_CROSS], py[ADV_N_CROSS]; touch_fit_t f;
+        for (int i = 0; i < ADV_N_CROSS; i++) { adv_cross_target(i, &tx[i], &ty[i]); adv_panel(tx[i], ty[i], turned, i, &px[i], &py[i]); }
+        if (!touch_fit_solve(tx, ty, px, py, ADV_N_CROSS, turned, &f)) AFAIL("a plain stretched panel%s was refused", turned ? " (turned over)" : "");
+        float worst = 0;
+        for (int i = 0; i < ADV_N_CROSS; i++) { float x = px[i], y = py[i]; touch_fit_apply(&f, &x, &y, turned); worst = fmaxf(worst, hypotf(x - tx[i], y - ty[i])); }
+        if (worst > 5) AFAIL("the map leaves a cross %.1f px off%s", worst, turned ? " (turned over)" : "");
+        printf("selftest-advanced: map %s x %.3f %+.1f y %.3f %+.1f, worst cross %.1f px\n", turned ? "turned over:" : "upright:    ", f.ax, f.bx, f.ay, f.by, worst);
+        for (int i = 0; i < ADV_N_CROSS; i++) { px[i] = (float)((i * 97) % TANK_W); py[i] = (float)((i * 61) % TANK_H); }   /* a sitting of stray taps */
+        if (touch_fit_solve(tx, ty, px, py, ADV_N_CROSS, turned, &f)) AFAIL("stray taps were taken for a map");
+    }
+    /* the page: the chord's own finger lifts without a tap */
+    adv_init(ADV_CELL_STOCK, NULL);
+    adv_open();
+    adv_touch(100, 100, true, false);
+    if (adv_touch(100, 100, false, false) != ADV_ACT_NONE || adv_page() != ADV_PG_MAIN) AFAIL("the chord's finger, lifting, did something");
+    /* a faster size: SET -> the warning, held, gated by the box */
+    if (n_fast) {
+        int target = adv_cell_fast(800) ? 800 : 0;
+        for (int i = 0; i < n && !target; i++) if (adv_cell_fast(sz[i])) target = sz[i];
+        for (int guard = 0; adv_pick() != target && guard < 20; guard++) adv_tap_hit(adv_hit_main, ADV_HIT_NEXT);
+        if (adv_pick() != target) AFAIL("NEXT never reached %d mAh (at %d)", target, adv_pick());
+        if (adv_cell() != ADV_CELL_STOCK) AFAIL("stepping changed the size in use");
+        adv_tap_hit(adv_hit_main, ADV_HIT_SET);
+        if (adv_page() != ADV_PG_WARN) AFAIL("SET %d mAh (faster) did not bring the warning", target);
+        adv_tap_hit(adv_hit_warn, ADV_HIT_BOX); adv_tap_hit(adv_hit_warn, ADV_HIT_CONTINUE);
+        if (adv_page() != ADV_PG_WARN || adv_cell() != ADV_CELL_STOCK) AFAIL("taps in the warning's first 2 s counted");
+        adv_tick(2.1f);
+        if (adv_tap_hit(adv_hit_warn, ADV_HIT_CONTINUE) != ADV_ACT_NONE || adv_cell() != ADV_CELL_STOCK) AFAIL("CONTINUE worked with the box empty");
+        adv_tap_hit(adv_hit_warn, ADV_HIT_CANCEL);
+        if (adv_page() != ADV_PG_MAIN || adv_cell() != ADV_CELL_STOCK || adv_pick() != ADV_CELL_STOCK) AFAIL("CANCEL did not keep the old size");
+        for (int guard = 0; adv_pick() != target && guard < 20; guard++) adv_tap_hit(adv_hit_main, ADV_HIT_NEXT);
+        adv_tap_hit(adv_hit_main, ADV_HIT_SET); adv_tick(2.1f);
+        adv_tap_hit(adv_hit_warn, ADV_HIT_BOX);
+        if (adv_tap_hit(adv_hit_warn, ADV_HIT_CONTINUE) != ADV_ACT_CELL || adv_cell() != target || adv_page() != ADV_PG_MAIN) AFAIL("box ticked, CONTINUE did not set %d mAh", target);
+        printf("selftest-advanced: %d mAh through the warning (held 2 s, CONTINUE dead until the box, CANCEL kept %d): charges at %d mA\n", target, ADV_CELL_STOCK, adv_charge_ma(target));
+    } else printf("selftest-advanced: no size charges faster than this board's own %d mA: the warning never shows here\n", ADV_CHARGE_STOCK);
+    /* a slower size: at once, no warning */
+    for (int guard = 0; adv_pick() >= ADV_CELL_STOCK && guard < 20; guard++) adv_tap_hit(adv_hit_main, ADV_HIT_PREV);
+    if (adv_tap_hit(adv_hit_main, ADV_HIT_SET) != ADV_ACT_CELL || adv_page() != ADV_PG_MAIN || adv_cell() >= ADV_CELL_STOCK) AFAIL("a smaller size did not apply at once");
+    printf("selftest-advanced: %d mAh (smaller) set at once at %d mA\n", adv_cell(), adv_charge_ma(adv_cell()));
+    /* touch: a sitting on a stretched panel, the check through the new map */
+    for (int run = 0; run < 4; run++) {                      /* 0 timed out, 1 kept, 2 stray taps, 3 a missed check then the clock */
+        adv_tap_hit(adv_hit_main, ADV_HIT_CALIBRATE);
+        if (adv_page() != ADV_PG_TOUCH) AFAIL("CALIBRATE did not open the touch page");
+        adv_tap_hit(run == 2 ? adv_hit_intro_own : adv_hit_intro, ADV_HIT_START);
+        if (adv_page() != ADV_PG_CROSS || !touch_fit_is_none(adv_touch_fit())) AFAIL("START: not the crosses, or the old map still on");
+        for (int i = 0; i < ADV_N_CROSS; i++) {
+            float tx, ty, px, py; adv_cross_target(i, &tx, &ty); adv_panel(tx, ty, false, i, &px, &py);
+            if (run == 2) { px = (float)((i * 97) % TANK_W); py = (float)((i * 61) % TANK_H); }
+            touch_fit_apply(adv_touch_fit(), &px, &py, false); adv_tap(px, py, false);
+        }
+        if (run == 2) {
+            if (adv_page() != ADV_PG_TOUCH || touch_fit_is_none(adv_touch_fit())) AFAIL("stray taps: not refused, or the saved map lost");
+            adv_tap_hit(adv_hit_intro_own, ADV_HIT_BACK); continue;
+        }
+        if (adv_page() != ADV_PG_CHECK || touch_fit_is_none(adv_touch_fit())) AFAIL("nine crosses: no check, or no new map on");
+        float cx, cy, px, py; adv_check_target(&cx, &cy);
+        if (run == 3) { adv_tap(cx + 120 > TANK_W - 1 ? cx - 120 : cx + 120, cy, false);
+                        if (adv_page() != ADV_PG_CHECK) AFAIL("a press far from the check cross kept the map"); }
+        if (run == 1) {
+            adv_panel(cx, cy, false, 5, &px, &py); touch_fit_apply(adv_touch_fit(), &px, &py, false);
+            if (adv_tap(px, py, false) != ADV_ACT_FIT || adv_page() != ADV_PG_TOUCH) AFAIL("the check cross, tapped through the new map, did not keep it");
+            printf("selftest-advanced: touch sitting kept: x %.3f %+.1f y %.3f %+.1f (the panel: x %.2f %+.0f, y %.2f %+.0f)\n",
+                   adv_touch_fit()->ax, adv_touch_fit()->bx, adv_touch_fit()->ay, adv_touch_fit()->by, PANEL_GX, PANEL_OX, PANEL_GY, PANEL_OY);
+        } else {
+            touch_fit_t before = run == 0 ? TOUCH_FIT_NONE : *adv_touch_fit();
+            adv_tick(ADV_CHECK_S + 0.5f);
+            if (adv_page() != ADV_PG_TOUCH) AFAIL("the check never ran out");
+            if (run == 0 && !touch_fit_is_none(adv_touch_fit())) AFAIL("the check ran out and the new map stayed");
+            (void)before;
+        }
+        adv_tap_hit(touch_fit_is_none(adv_touch_fit()) ? adv_hit_intro : adv_hit_intro_own, ADV_HIT_BACK);
+    }
+    { touch_fit_t kept = *adv_touch_fit();               /* a sitting cut short by sleep keeps the saved map */
+      adv_tap_hit(adv_hit_main, ADV_HIT_CALIBRATE); adv_tap_hit(adv_hit_intro_own, ADV_HIT_START);
+      adv_close();
+      if (memcmp(&kept, adv_touch_fit(), sizeof kept)) AFAIL("the page closed mid-sitting and the saved map was lost");
+      adv_open(); adv_touch(0, 0, false, false); }
+    adv_tap_hit(adv_hit_main, ADV_HIT_CALIBRATE);
+    if (adv_tap_hit(adv_hit_intro_own, ADV_HIT_RESET) != ADV_ACT_FIT || !touch_fit_is_none(adv_touch_fit())) AFAIL("RESET TOUCH did not drop the keeper's map");
+    adv_tap_hit(adv_hit_intro, ADV_HIT_BACK);
+    if (adv_tap_hit(adv_hit_main, ADV_HIT_BACK) != ADV_ACT_BACK || adv_up()) AFAIL("BACK did not close the page");
+    printf("selftest-advanced: check timed out -> old map, missed check held, stray sitting refused, closed mid-sitting kept the map, RESET TOUCH, BACK: ok\n");
+    printf("selftest-advanced: PASS\n");
+    return 0;
+    #undef AFAIL
+}
+
 static int selftest_update(void) {
     setenv("POCKET_TANK_SAVE", "/tmp/pocket-tank-selftest-update.sav", 1);
     setenv("POCKET_TANK_WIFI", "/tmp/pocket-tank-selftest-wifi.txt", 1);
@@ -2181,7 +2333,7 @@ static void sound_init(void) {
 /* per frame: the notice queue, the bubble loop, the card cue, night */
 static void sound_frame(uint32_t now, float dt) {
     if (advisor_core_damaged()) notice_model_damaged();   /* the LLM brain's odds were not numbers (notice.h) */
-    notice_tick(&tank, dt, setup_active() || setup_birth_due() || confirm_view || milestones_view || settings_view || shop_view || battery_view);
+    notice_tick(&tank, dt, setup_active() || setup_birth_due() || confirm_view || milestones_view || settings_view || shop_view || battery_view || adv_up());
     int cue = notice_take_cue();
     if (cue >= 0) snd(cue, AUDIO_PITCH_ONE);
     bool loop = setup_active() && !setup_is_birth() && setup_page() == SETUP_PG_BUBBLES;
@@ -2251,7 +2403,8 @@ static void frame_cb(lv_timer_t *timer) {
         return;
     }
     tank.hold_light = setup_active() || confirm_view;   /* no lights-out mid-name */
-    tank.ui_cover = tank.hold_light || milestones_view || settings_view || shop_view || battery_view || updates_view;   /* a fry's spawning waits */
+    tank.ui_cover = tank.hold_light || milestones_view || settings_view || shop_view || battery_view || updates_view || adv_up();   /* a fry's spawning waits */
+    adv_tick(dt);
     tank_tick(&tank, dt, llm_active ? advisor_llm : advisor_rules);
     {   /* the pretend cell, and the battery page's history fed once a second, as the device feeds it */
         if (sim_bat_state == BAT_ON_BATTERY) sim_bat_pct = fmaxf(0, sim_bat_pct - BAT_DRAIN_DEFAULT / 3600 * dt);
@@ -2272,7 +2425,8 @@ static void frame_cb(lv_timer_t *timer) {
     { int rf = setup_take_renamed();              /* a rename closed: back to the milestones page, the fish's card up */
       if (rf >= 0) { milestones_view = true; render_milestones_show_fish(&tank, rf); printf("milestones: back on %s's card\n", tank.fish[rf].name); } }
     sound_frame(now, dt);
-    if (milestones_view) render_milestones(&tank, canvas_buf, TANK_W);
+    if (adv_up()) adv_render(canvas_buf, TANK_W);              /* the ADVANCED page (0.3.9.2) */
+    else if (milestones_view) render_milestones(&tank, canvas_buf, TANK_W);
     else if (settings_view) render_settings(&tank, canvas_buf, TANK_W, sim_bright, audio_volume());
     else if (updates_view) render_updates_page(canvas_buf, TANK_W);
     else if (shop_view) render_shop(&tank, canvas_buf, TANK_W);
@@ -3481,6 +3635,31 @@ static int snapshot(const char *prefix, int seconds) {
     render_settings(&tank, fb, TANK_W, 5, 2);                      /* AUTO after 3 MIN, AUTO FEED off, the way up locked; the slider at its dim end */
     snprintf(path, sizeof path, "%s_settings_auto.ppm", prefix); write_ppm(path, fb);
     tank_light_choice_set(&tank, 0); tank.autofeed_off = false; tank_orient_lock(&tank, false);
+    {   /* the ADVANCED page (0.3.9.2, hidden: BOOT 5 s + a tap on settings): the board's own cell, a bigger one picked,
+           the warning both ways, touch calibration's pages */
+        const int *sz; int n = adv_cell_sizes(&sz), big = 800;
+        for (int i = 0; i < n; i++) if (adv_cell_fast(sz[i])) { big = sz[i] < 800 && adv_cell_fast(800) ? 800 : sz[i]; break; }
+        render_advanced(fb, TANK_W, ADV_CELL_STOCK, ADV_CHARGE_STOCK, ADV_CELL_STOCK, true, false);
+        snprintf(path, sizeof path, "%s_advanced.ppm", prefix); write_ppm(path, fb);
+        render_advanced(fb, TANK_W, big, adv_charge_ma(big), ADV_CELL_STOCK, false, adv_cell_fast(big));
+        snprintf(path, sizeof path, "%s_advanced_picked.ppm", prefix); write_ppm(path, fb);
+        render_advanced(fb, TANK_W, big, adv_charge_ma(big), big, false, adv_cell_fast(big));
+        snprintf(path, sizeof path, "%s_advanced_set.ppm", prefix); write_ppm(path, fb);
+        render_battery_warning(fb, TANK_W, big, adv_charge_ma(big), false);
+        snprintf(path, sizeof path, "%s_advanced_warning.ppm", prefix); write_ppm(path, fb);
+        render_battery_warning(fb, TANK_W, big, adv_charge_ma(big), true);
+        snprintf(path, sizeof path, "%s_advanced_warning_ticked.ppm", prefix); write_ppm(path, fb);
+        render_touch_intro(fb, TANK_W, false, NULL);
+        snprintf(path, sizeof path, "%s_advanced_touch.ppm", prefix); write_ppm(path, fb);
+        render_touch_intro(fb, TANK_W, true, "NEW TOUCH SAVED");
+        snprintf(path, sizeof path, "%s_advanced_touch_saved.ppm", prefix); write_ppm(path, fb);
+        float cx, cy; adv_cross_target(2, &cx, &cy);
+        render_touch_cross(fb, TANK_W, 2, ADV_N_CROSS, (int)cx, (int)cy);
+        snprintf(path, sizeof path, "%s_advanced_touch_cross.ppm", prefix); write_ppm(path, fb);
+        adv_check_target(&cx, &cy);
+        render_touch_check(fb, TANK_W, (int)cx, (int)cy, 11.2f, ADV_CHECK_S);
+        snprintf(path, sizeof path, "%s_advanced_touch_check.ppm", prefix); write_ppm(path, fb);
+    }
     {   /* the UPDATES page and update mode's pages (2026-09-30), over the pretend radio */
         setenv("POCKET_TANK_WIFI", "/tmp/pocket-tank-snapshot-wifi.txt", 1); net_port_creds_forget();
         render_updates_page(fb, TANK_W);
@@ -6892,6 +7071,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[a], "--selftest-sleep") == 0) return selftest_sleep();
         if (strcmp(argv[a], "--selftest-tend") == 0) return selftest_tend();
         if (strcmp(argv[a], "--selftest-update") == 0) return selftest_update();
+        if (strcmp(argv[a], "--selftest-advanced") == 0) return selftest_advanced();
         if (strcmp(argv[a], "--selftest-model") == 0)
             return selftest_model(a + 1 < argc && argv[a + 1][0] != '-' ? argv[a + 1] : NULL);
         if (strcmp(argv[a], "--selftest-llm") == 0)
@@ -6900,12 +7080,16 @@ int main(int argc, char **argv) {
 
     tank_init(&tank, (uint32_t)SDL_GetTicks() + 7);
     battery_init(&sim_bat, NULL);
-    bool fresh = false;
+    bool fresh = false, fullscreen = false;
+    int zoom = 1;                                /* the window at N x the glass (whole pixels only; taps divide back) */
     for (int a = 1; a < argc; a++) {
         if (strcmp(argv[a], "--fresh") == 0) fresh = true;
         if (strcmp(argv[a], "--battery") == 0 && a + 1 < argc) sim_bat_pct = fminf(100, fmaxf(0, (float)atof(argv[++a])));
         if (strcmp(argv[a], "--fast") == 0 && a + 1 < argc) progression_time_scale = (float)atof(argv[++a]);
+        if (strcmp(argv[a], "--zoom") == 0 && a + 1 < argc) zoom = atoi(argv[++a]);
+        if (strcmp(argv[a], "--fullscreen") == 0) fullscreen = true;
     }
+    if (zoom < 1) zoom = 1; if (zoom > 8) zoom = 8;
     if (fresh) {
         char cmd[600]; snprintf(cmd, sizeof cmd, "rm -f '%s/.cache/pocket-tank/tank.sav'", getenv("HOME") ? getenv("HOME") : ".");
         (void)system(cmd);
@@ -6931,7 +7115,35 @@ int main(int argc, char **argv) {
     lv_init();
     lv_tick_set_cb(tick_cb);
     lv_display_t *disp = lv_sdl_window_create(TANK_W, TANK_H);
-    lv_sdl_window_set_title(disp, "pocket-tank sim 448x368");
+    if (fullscreen) {                            /* the biggest whole-pixel zoom the desktop fits; bars take the rest */
+        SDL_DisplayMode dm;
+        if (SDL_GetDesktopDisplayMode(0, &dm) == 0) {
+            int fit = dm.w / TANK_W < dm.h / TANK_H ? dm.w / TANK_W : dm.h / TANK_H;
+            if (fit < 1) fit = 1; if (fit > 8) fit = 8;
+            if (zoom == 1 || fit < zoom) zoom = fit;   /* an explicit --zoom only ever shrinks it */
+        }
+    } else if (zoom > 1) {                       /* never ask for a window the desk cannot hold: macOS clamps it and the picture squashes */
+        SDL_Rect ub;
+        if (SDL_GetDisplayUsableBounds(0, &ub) == 0) {
+            int fit = ub.w / TANK_W < ub.h / TANK_H ? ub.w / TANK_W : ub.h / TANK_H;
+            if (fit < 1) fit = 1;
+            if (zoom > fit) zoom = fit;
+        }
+    }
+    if (zoom > 1) lv_sdl_window_set_zoom(disp, (uint8_t)zoom);
+    SDL_Window *win = NULL;                      /* the driver keeps its window; ours is the only one, find it by id */
+    for (uint32_t id = 1; id < 16 && !win; id++) win = SDL_GetWindowFromID(id);
+    if (fullscreen) {
+        if (win) SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    }
+    { char title[64];
+      snprintf(title, sizeof title, zoom > 1 ? "pocket-tank sim %dx%d x%d" : "pocket-tank sim %dx%d", TANK_W, TANK_H, zoom);
+      lv_sdl_window_set_title(disp, title); }
+    if (win && (zoom > 1 || fullscreen)) {
+        int ww = 0, wh = 0; SDL_GetWindowSize(win, &ww, &wh);
+        printf("window %dx%d: the glass %dx%d at x%d%s\n", ww, wh, TANK_W, TANK_H, zoom, fullscreen ? ", fullscreen" : "");
+    }
 
     lv_draw_buf_init(&draw_buf, TANK_W, TANK_H, LV_COLOR_FORMAT_RGB565,
                      TANK_W * 2, canvas_buf, sizeof(canvas_buf));
@@ -6965,6 +7177,15 @@ int main(int argc, char **argv) {
         const Uint8 *k = SDL_GetKeyboardState(NULL);
         int mx, my;
         bool mpress = SDL_GetMouseState(&mx, &my) & SDL_BUTTON(SDL_BUTTON_LEFT);
+        if (zoom > 1 || fullscreen) {            /* window pixels -> glass pixels (fullscreen centers the canvas) */
+            mx = mx / zoom - lv_obj_get_x(canvas);
+            my = my / zoom - lv_obj_get_y(canvas);
+            if (mx < 0 || mx >= TANK_W || my < 0 || my >= TANK_H) {   /* the bars: a hand near the tank, never a touch */
+                mpress = false;
+                mx = mx < 0 ? 0 : mx >= TANK_W ? TANK_W - 1 : mx;
+                my = my < 0 ? 0 : my >= TANK_H ? TANK_H - 1 : my;
+            }
+        }
         if (sim_view_turned()) { mx = TANK_W - 1 - mx; my = TANK_H - 1 - my; }   /* the window shows the glass turned: the finger is too */
         { static int lmx = -1, lmy = -1;            /* a hand near the tank: the mouse moving over the window */
           if (mx != lmx || my != lmy || mpress || k[SDL_SCANCODE_H]) tank_handled(&tank);
@@ -6976,6 +7197,18 @@ int main(int argc, char **argv) {
          *                                              on the surface = feed)
          *   drag down >= 40 px starting near the top: FEED at that x
          *   held > 300 ms: HOLD (finger resting on the glass) */
+        {   /* the BOOT chord (0.3.9.2; the 0 key is BOOT here): held ADV_BOOT_HOLD_S, then a click - on the settings page the
+               ADVANCED page, anywhere else the reset prompt. A click before the 5 s is an ordinary click. */
+            static uint32_t boot_since; static bool chord_used;
+            if (!k[SDL_SCANCODE_0]) { boot_since = 0; chord_used = false; }
+            else if (!boot_since) boot_since = now_ms ? now_ms : 1;
+            if (boot_since && !chord_used && mpress && !mdown && now_ms - boot_since >= (uint32_t)(ADV_BOOT_HOLD_S * 1000) && !confirm_view && !update_mode) {
+                chord_used = true;
+                if (settings_view) { settings_view = false; render_settings_cancel(); adv_open(); printf("BOOT %.0f s + tap on settings: the ADVANCED page\n", ADV_BOOT_HOLD_S); }
+                else { confirm_view = true; confirm_ms = now_ms; selected_fish = -1; milestones_view = false; shop_view = false; render_shop_leave();
+                       printf("BOOT %.0f s + tap: reset prompt\n", ADV_BOOT_HOLD_S); }
+            }
+        }
         if (mpress && !mdown) {
             press_ms = now_ms; press_x = mx; press_y = my;
             for (int i = 0; i < tank.n_fish; i++) { press_fx[i] = tank.fish[i].x; press_fy[i] = tank.fish[i].y; }
@@ -6997,6 +7230,13 @@ int main(int argc, char **argv) {
                                        tank_decor_z(&tank, place) == DECOR_Z_BACK ? "BEHIND" : tank_decor_z(&tank, place) == DECOR_Z_FRONT ? "IN FRONT" : "AMONG");
                 else { printf(birth ? "birth flow done: %s named and saved\n" : "setup done\n", who >= 0 ? tank.fish[who].name : "?"); print_roster(&tank); }
             }
+        } else if (adv_up() && !confirm_view) {                  /* the ADVANCED page (0.3.9.2): the finger through the keeper's touch map */
+            float fx = (float)mx, fy = (float)my; touch_fit_apply(adv_touch_fit(), &fx, &fy, false);
+            int r = adv_touch(fx, fy, mpress, false);
+            if (r == ADV_ACT_BACK) { settings_view = true; ms_back = true; printf("advanced: BACK -> settings\n"); }
+            else if (r == ADV_ACT_CELL) printf("advanced: battery %d mAh, charges at %d mA (end of charge %d mA)\n", adv_cell(), adv_charge_ma(adv_cell()), adv_trickle_ma(adv_cell()));
+            else if (r == ADV_ACT_FIT) { const touch_fit_t *f = adv_touch_fit(); printf("advanced: touch map %s (x %.3f %+.1f, y %.3f %+.1f)\n", touch_fit_is_none(f) ? "back to the board's own" : "saved", f->ax, f->bx, f->ay, f->by); }
+            else if (r == ADV_ACT_TICK) snd(SND_WHEEL_TICK, AUDIO_PITCH_ONE);
         } else if (settings_view && !confirm_view) {             /* the settings page: segments, LIGHTS OUT's arrows, CLOSE */
             int v = 0, r = render_settings_touch(&tank, (float)mx, (float)my, mpress, &v);
             if (r == SET_TAP_CLOSE) { settings_view = false; milestones_view = true; ms_back = true; }   /* back to the milestones page */
@@ -7019,7 +7259,7 @@ int main(int argc, char **argv) {
                 printf("update mode: the tank would save and restart now (pretend radio; POCKET_TANK_FAKE_UPDATE steers the check)\n");
             }
         }
-        bool modal = confirm_view || setup_up || settings_view || shop_view || battery_view || updates_view;
+        bool modal = confirm_view || setup_up || settings_view || shop_view || battery_view || updates_view || adv_up();
         if (mpress && !modal) tank_touch_drag(&tank, (float)mx, (float)my);   /* stroke -> wipe/slash */
         if (mpress && !modal && !held_page && tank.tool == TOOL_HAND && now_ms - press_ms > 700 && abs(mx - press_x) < 24 && abs(my - press_y) < 24) {   /* tap-and-hold on a piece: its page (2026-09-24); not with a tool in hand */
             int it = tank_decor_hit(&tank, (float)press_x, (float)press_y);
@@ -7041,7 +7281,7 @@ int main(int argc, char **argv) {
             else if (setup_up) { /* the setup owns the glass: setup_touch took it */ }
             else if (notice_current() && notice_dismiss()) { }   /* an announcement up: the tap closes it (the lights-out notice lets it through: notice.h) */
             else if (battery_view) battery_view = false;      /* the battery page: any click closes it */
-            else if (settings_view || updates_view || ms_back) ms_back = false;   /* the page owns the glass: render_settings_touch took it
+            else if (settings_view || updates_view || ms_back || adv_up()) ms_back = false;   /* the page owns the glass: render_settings_touch took it
                                                                     (and its CLOSE already brought the milestones page back) */
             else if (shop_view) {                       /* the shop: a row's modal, UNLOCK, HOW TO EARN, CLOSE */
                 int r = render_shop_tap(&tank, (float)press_x, (float)press_y);

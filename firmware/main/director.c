@@ -18,6 +18,7 @@
 const char *net_port_manifest_url(void);
 bool net_port_set_manifest_url(const char *url);
 #include "touch_port.h"
+#include "advanced.h"
 #include "battery_port.h"
 #include "display_port.h"
 #include "board_pins.h"
@@ -210,6 +211,7 @@ static void help(void) {
     ESP_LOGI(TAG, "battery <pct> [charging|full|plugged]|real (a STAGED gauge: on battery at pct - the card's pill, and at 10 or less the low-battery notice + cue + the pill that stays - or on the cable: the bolt, the sweep while charging, the pill for a few seconds; not saved) | battery page [off] (the battery page, as a tap on the pill opens it) | battery (its numbers) | snd battery (just the notice + cue)");
     ESP_LOGI(TAG, "kbd [wheel|grid|pages] (the name page's design: the wheel, or one of the two rejected keyboards of 09-13 - not saved, a boot is the wheel)");
     ESP_LOGI(TAG, "touch [bias <px>] [log on|off] [lift <ms>] [said on|off] (finger-landing correction: reported touches move up by px; not saved; also the raw span seen since boot)");
+    ESP_LOGI(TAG, "advanced [off] (the hidden ADVANCED page: battery size + touch calibration; on the glass: settings, BOOT held 5 s, then a tap)");
     ESP_LOGI(TAG, "charge [mA] (the charger live: state, VBUS, die temperature; a current tried until the next boot) | pmic (AXP2101 dump) | pmic on|off <aldo1|aldo2..4|bldo1|bldo2|cpusldo|dcdc2..5|dldo1|dldo2> (experiments; boot trims the unused ones) | pmic trim");
     ESP_LOGI(TAG, "bright <0-255> (panel now; not saved) | level 5..100 by 5 (the keeper's setting, saved)");
     ESP_LOGI(TAG, "batlog [clear] (the tank's own battery log: SoC/VBAT every 5 min awake, 30 min asleep, mA derived - read it after a night on battery) | codec (ES8311 registers) | clock (the clock: RTC chip or the internet's time, and whether tonight is a power-off) | sleepcfg [mask] (the round board's deep-sleep savings: 1 touch, 2 panel, 4 IMU, 8 QSPI held; 15 = all, the default) | deepsleep [N] (N: 5 s grace then deep sleep with an N s timer wake - one batlog window per N, BOOT wakes it; no N: the keeper's sleep, grace then power-off) | poweroff (save + PMIC cut now) | keytime [N] (N s of timing every PWR press - is a tap under the PMIC's 128 ms power-on hold?)");
@@ -345,6 +347,11 @@ static void run(tank_t *t, char *line) {
     } else if (!strcmp(c, "settings")) {
         bool on = argc < 2 || strcmp(argv[1], "off");
         touch_port_show_settings(on); ESP_LOGI(TAG, "settings page %s", on ? "up (CLOSE ends it)" : "closed");
+    } else if (!strcmp(c, "advanced")) {        /* the hidden ADVANCED page (0.3.9.2) without the BOOT chord: advanced [off] */
+        bool on = argc < 2 || strcmp(argv[1], "off");
+        if (on) touch_port_open_advanced(); else adv_close();
+        ESP_LOGI(TAG, "advanced page %s | battery %d mAh -> %d mA (the board's own %d mAh) | touch %s", on ? "up (BACK ends it)" : "closed",
+                 adv_cell(), adv_charge_ma(adv_cell()), ADV_CELL_STOCK, touch_fit_is_none(adv_touch_fit()) ? "the board's own map" : "the keeper's map");
     } else if (!strcmp(c, "milestones")) {
         bool on = argc < 2 || strcmp(argv[1], "off");
         touch_port_show_milestones(on); ESP_LOGI(TAG, "milestones page %s", on ? "up (CLOSE button ends it)" : "closed");

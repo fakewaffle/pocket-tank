@@ -3,6 +3,7 @@
  * the keeper trims. Everything is drawn
  * into a bare RGB565 buffer; night dims the palette. */
 #include "render.h"
+#include "advanced.h"
 #include "icons.h"
 #include "progression.h"
 #include "tank_events.h"
@@ -5209,7 +5210,7 @@ static void draw_text_8px(ctx_t *c, int x, int y, uint32_t rgb, const char *s) {
 }
 
 /* ---- reset confirm (2026-09-11) ----
- * The keeper's "start over" (device: hold BOOT, tap the glass; sim: X). A
+ * The keeper's "start over" (device: hold BOOT 5 s, then tap the glass - 0.3.9.2; sim: X, or the 0 key held 5 s + a click). A
  * modal panel over the live tank - the fish keep swimming behind it - that
  * asks before the save is wiped. Opaque stores only, so a frame with it up
  * costs about what the milestones page does. */
@@ -6527,22 +6528,23 @@ int render_settings_tap(float x, float y, int *value) {
     }
     return SET_TAP_NONE;
 }
+static bool s_set_down; static float s_set_px, s_set_py; static int s_set_hit, s_set_hv;   /* render_settings_touch's press in hand */
+void render_settings_cancel(void) { s_set_down = false; s_set_hit = SET_TAP_NONE; }
 int render_settings_touch(tank_t *t, float x, float y, bool down, int *value) {
-    static bool s_down; static float s_px, s_py; static int s_hit, s_hv;
     int r = SET_TAP_NONE; *value = 0;
-    if (down && !s_down) {                                  /* press */
-        s_px = x; s_py = y;
-        s_hit = render_settings_tap(x, y, &s_hv);
-        if (s_hit == SET_TAP_BRIGHT) { r = SET_TAP_BRIGHT_LIVE; *value = s_hv; }   /* the slider: the knob jumps to the finger */
-    } else if (down && s_hit == SET_TAP_BRIGHT) {          /* the slider under a finger: the knob follows it along the row, */
+    if (down && !s_set_down) {                                  /* press */
+        s_set_px = x; s_set_py = y;
+        s_set_hit = render_settings_tap(x, y, &s_set_hv);
+        if (s_set_hit == SET_TAP_BRIGHT) { r = SET_TAP_BRIGHT_LIVE; *value = s_set_hv; }   /* the slider: the knob jumps to the finger */
+    } else if (down && s_set_hit == SET_TAP_BRIGHT) {          /* the slider under a finger: the knob follows it along the row, */
         int v = set_bright_at(x - PAGE_X);                  /* however far up or down the finger wanders */
-        if (v != s_hv) { s_hv = v; r = SET_TAP_BRIGHT_LIVE; *value = v; }
-    } else if (!down && s_down && s_hit == SET_TAP_BRIGHT) {   /* let go: the last step it showed is the setting */
-        r = SET_TAP_BRIGHT; *value = s_hv;
-    } else if (!down && s_down) {                           /* release: a tap, if it stayed on what it pressed */
+        if (v != s_set_hv) { s_set_hv = v; r = SET_TAP_BRIGHT_LIVE; *value = v; }
+    } else if (!down && s_set_down && s_set_hit == SET_TAP_BRIGHT) {   /* let go: the last step it showed is the setting */
+        r = SET_TAP_BRIGHT; *value = s_set_hv;
+    } else if (!down && s_set_down) {                           /* release: a tap, if it stayed on what it pressed */
         int v = 0, h = render_settings_tap(x, y, &v);
-        float dx = x - s_px, dy = y - s_py;
-        if (h == s_hit && dx * dx + dy * dy < 24 * 24) {
+        float dx = x - s_set_px, dy = y - s_set_py;
+        if (h == s_set_hit && dx * dx + dy * dy < 24 * 24) {
             if (h == SET_HIT_LIGHT_PREV || h == SET_HIT_LIGHT_NEXT) {   /* one choice along; either way the light comes on */
                 int was = tank_light_choice(t), now = was + (h == SET_HIT_LIGHT_NEXT ? 1 : -1);
                 if (now >= 0 && now <= LIGHT_IDLE_N) {
@@ -6562,6 +6564,187 @@ int render_settings_touch(tank_t *t, float x, float y, bool down, int *value) {
             } else if (h == SET_TAP_CLOSE || h == SET_TAP_VOLUME || h == SET_TAP_UPDATES) { r = h; *value = v; }
         }
     }
-    s_down = down;
+    s_set_down = down;
     return r;
+}
+
+/* ---- THE ADVANCED PAGE (0.3.9.2) ---------------------------------------
+ * Hidden behind a BOOT chord (common/advanced.c). Two rows on the settings
+ * page's grid: TOUCH (one wide CALIBRATE button) and BATTERY (the size
+ * between two arrows, as LIGHTS OUT steps its choice), a quiet note under
+ * each, BACK where CLOSE stands; FOR GROWN-UPS small under the title. */
+#define ADV_WARN_RGB  0xffc94a          /* the warning's triangle (its shape says it; the hue only helps) */
+#define ADV_BAT_ROW   (SET_ROW1_Y + 108)                          /* the BATTERY row's label line */
+#define ADV_SET_Y     (SET_SEG_Y(ADV_BAT_ROW) + SET_SEG_H + 34)   /* SET <size>, under the row's note */
+#define ADV_SET_H     36
+#define ADV_WARN_BOX_Y (SET_TITLE_Y + 202)                        /* the warning's box to tick: 20 px under READ THE SIZE PRINTED ON IT. */
+#define ADV_WARN_BOX   30
+#define ADV_CONT_W     128
+#define ADV_CONT_X     (SET_CLOSE_X + MSP_CLOSE_W - ADV_CONT_W > SET_UPD_X + SET_UPD_W + 10 ? SET_CLOSE_X + MSP_CLOSE_W - ADV_CONT_W : SET_UPD_X + SET_UPD_W + 10)
+#define ADV_START_Y    (SET_TITLE_Y + 164)                        /* the touch page's START */
+#define ADV_START_W    140
+#define ADV_RESET_Y    (ADV_START_Y + SET_SEG_H + 16)             /* ... RESET TOUCH under it */
+#define ADV_RESET_W    160
+/* the warning sign: a solid triangle, point up, w wide, its ! cut out in ink */
+static void adv_warn_sign(ctx_t *c, int cx, int top, int w, uint32_t rgb) {
+    int h = w * 7 / 8;
+    for (int dy = 0; dy < h; dy++) {
+        int half = (w / 2) * dy / h;
+        rect_fill(c, cx - half, top + dy, 2 * half + 1, 1, rgb);
+    }
+    int bw = w / 9 < 2 ? 2 : w / 9;
+    rect_fill(c, cx - bw / 2, top + h * 3 / 8, bw, h * 3 / 8, MSP_INK);
+    rect_fill(c, cx - bw / 2, top + h * 13 / 16, bw, bw, MSP_INK);
+}
+static void text_centre(ctx_t *c, int y, int scale, uint32_t rgb, const char *s) {
+    draw_text(c, (PAGE_W - text_w(s, scale)) / 2, y, scale, rgb, s);
+}
+static void lit_button(ctx_t *c, int x, int y, int w, int h, const char *label) {   /* teal, ink lettering */
+    button(c, x, y, w, h, MSP_TEAL, MSP_TEAL, "", 2);
+    draw_text(c, x + (w - text_w(label, 2)) / 2, y + (h - 14) / 2, 2, MSP_INK, label);
+}
+void render_advanced(uint16_t *fb, int stride, int pick_mah, int pick_ma, int set_mah, bool stock, bool fast) {
+    ctx_t c = ctx_page(fb, stride);
+    char txt[40];
+    rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
+    text_centre(&c, SET_TITLE_Y, 3, 0xffffff, "ADVANCED");
+    draw_text_8px(&c, (PAGE_W - (13 * 6 - 1)) / 2, SET_TITLE_Y + 25, MSP_QUIET, "FOR GROWN-UPS");
+    /* TOUCH */
+    draw_text(&c, SET_LABEL_X, SET_ROW1_Y, 2, MSP_TEAL, "TOUCH");
+    button(&c, SET_SEG_X, SET_SEG_Y(SET_ROW1_Y), SET_SPAN_W, SET_SEG_H, 0x1c2f36, MSP_TEAL, "CALIBRATE", 2);
+    draw_text(&c, SET_LABEL_X, SET_SEG_Y(SET_ROW1_Y) + SET_SEG_H + 10, 2, MSP_QUIET, "TAPS MISSING THEIR MARK?");
+    /* BATTERY: < 800 MAH > */
+    int y = SET_SEG_Y(ADV_BAT_ROW);
+    int bx = SET_SEG_X + SET_ARW_W + 4, bw = SET_SPAN_W - 2 * (SET_ARW_W + 4);
+    const int *sz; int n = adv_cell_sizes(&sz);
+    draw_text(&c, SET_LABEL_X, ADV_BAT_ROW, 2, MSP_TEAL, "BATTERY");
+    set_arrow(&c, SET_SEG_X, y, false, pick_mah > sz[0]);
+    button(&c, bx, y, bw, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
+    snprintf(txt, sizeof txt, "%d MAH", pick_mah);
+    int tw = text_w(txt, 2), sx = bx + (bw - tw - (fast ? 22 : 0)) / 2;
+    if (fast) adv_warn_sign(&c, sx + 8, y + (SET_SEG_H - 15) / 2, 17, MSP_INK);   /* faster than the board's own: the sign rides along */
+    draw_text(&c, sx + (fast ? 22 : 0), y + (SET_SEG_H - 14) / 2, 2, MSP_INK, txt);
+    set_arrow(&c, SET_SEG_X + SET_SPAN_W - SET_ARW_W, y, true, pick_mah < sz[n - 1]);
+    if (stock) snprintf(txt, sizeof txt, "STANDARD - CHARGES AT %d MA", pick_ma);
+    else       snprintf(txt, sizeof txt, "CHARGES AT %d MA", pick_ma);
+    draw_text(&c, SET_LABEL_X, y + SET_SEG_H + 10, 2, MSP_QUIET, txt);
+    if (pick_mah != set_mah) {                    /* a size picked, not in use yet: SET applies it (the warning first, when it is faster) */
+        snprintf(txt, sizeof txt, "SET %d MAH", pick_mah);
+        lit_button(&c, SET_SEG_X, ADV_SET_Y, SET_SPAN_W, ADV_SET_H, txt);
+        snprintf(txt, sizeof txt, "NOW %d MAH", set_mah);
+        draw_text(&c, SET_LABEL_X, ADV_SET_Y + (ADV_SET_H - 14) / 2, 2, MSP_QUIET, txt);
+    } else draw_text(&c, SET_LABEL_X, y + SET_SEG_H + 32, 2, MSP_QUIET, "MATCH THE SIZE ON YOUR BATTERY");
+    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "BACK", 2);
+}
+int render_advanced_tap(float x, float y) {
+    x -= PAGE_X; y -= PAGE_Y;
+    if (x >= SET_CLOSE_X - 8 && y >= SET_FOOT_Y - 4) return ADV_HIT_BACK;
+    if (x < SET_SEG_X - 10) return ADV_HIT_NONE;
+    if (y >= SET_SEG_Y(SET_ROW1_Y) - 12 && y < SET_SEG_Y(SET_ROW1_Y) + SET_SEG_H + 12) return ADV_HIT_CALIBRATE;
+    if (y >= SET_SEG_Y(ADV_BAT_ROW) - 12 && y < SET_SEG_Y(ADV_BAT_ROW) + SET_SEG_H + 12)
+        return x < SET_SPAN_MID ? ADV_HIT_PREV : ADV_HIT_NEXT;                         /* the row's halves, as LIGHTS OUT's */
+    if (y >= ADV_SET_Y - 8 && y < ADV_SET_Y + ADV_SET_H + 12) return ADV_HIT_SET;       /* (only while it is drawn: advanced.c asks) */
+    return ADV_HIT_NONE;
+}
+/* the battery warning: a whole page - the sign and WARNING, what the size
+ * does in plain words, the box to tick (the size again, in the keeper's own
+ * hand), CANCEL and CONTINUE. CONTINUE is an outline with dim words until
+ * the box is ticked, then a lit button (brightness and fill, not hue). */
+void render_battery_warning(uint16_t *fb, int stride, int cell_mah, int charge_ma, bool checked) {
+    ctx_t c = ctx_page(fb, stride);
+    char txt[48];
+    rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
+    {   /* the sign and the word, one group, centred */
+        int sw = 36, gap = 12, tw = text_w("WARNING", 3), x0 = (PAGE_W - sw - gap - tw) / 2;
+        adv_warn_sign(&c, x0 + sw / 2, SET_TITLE_Y - 6, sw, ADV_WARN_RGB);
+        draw_text(&c, x0 + sw + gap, SET_TITLE_Y, 3, 0xffffff, "WARNING");
+    }
+    int y = SET_TITLE_Y + 42;
+    text_centre(&c, y, 2, 0xffffff, "ONLY FOR A BIGGER BATTERY."); y += 30;
+    snprintf(txt, sizeof txt, "THE TANK WILL CHARGE AT %d MA.", charge_ma);
+    text_centre(&c, y, 2, MSP_TEAL, txt); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "A SMALLER BATTERY CHARGED THIS"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "FAST CAN GET HOT, SWELL UP"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "OR CATCH FIRE."); y += 30;
+    text_centre(&c, y, 2, 0xffffff, "READ THE SIZE PRINTED ON IT.");
+    {   /* the box: [x]  MY BATTERY IS 800 MAH / OR BIGGER */
+        snprintf(txt, sizeof txt, "MY BATTERY IS %d MAH", cell_mah);
+        int bs = ADV_WARN_BOX, gap = 14, tw = text_w(txt, 2), x0 = (PAGE_W - bs - gap - tw) / 2, by = ADV_WARN_BOX_Y;
+        rect_fill(&c, x0, by, bs, bs, checked ? MSP_TEAL : 0x1c2f36);
+        rect_edge(&c, x0, by, bs, bs, MSP_TEAL); rect_edge(&c, x0 + 1, by + 1, bs - 2, bs - 2, MSP_TEAL);
+        if (checked)                                         /* the tick: a short stroke down, a long one up */
+            for (int k = 0; k < 18; k++) {
+                int px = x0 + 6 + k, py = k < 6 ? by + 14 + k : by + 20 - (k - 6) * 13 / 12;
+                rect_fill(&c, px, py - 1, 2, 4, MSP_INK);
+            }
+        draw_text(&c, x0 + bs + gap, by, 2, 0xffffff, txt);
+        draw_text(&c, x0 + bs + gap, by + 20, 2, 0xffffff, "OR BIGGER");
+    }
+    button(&c, SET_UPD_X, SET_FOOT_Y, SET_UPD_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CANCEL", 2);
+    if (checked) lit_button(&c, ADV_CONT_X, SET_FOOT_Y, ADV_CONT_W, MSP_CLOSE_H, "CONTINUE");
+    else {
+        rect_edge(&c, ADV_CONT_X, SET_FOOT_Y, ADV_CONT_W, MSP_CLOSE_H, MSP_DIM);
+        draw_text(&c, ADV_CONT_X + (ADV_CONT_W - text_w("CONTINUE", 2)) / 2, SET_FOOT_Y + (MSP_CLOSE_H - 14) / 2, 2, MSP_DIM, "CONTINUE");
+    }
+}
+int render_battery_warning_tap(float x, float y) {
+    x -= PAGE_X; y -= PAGE_Y;
+    if (y >= SET_FOOT_Y - 8) {
+        if (x >= SET_UPD_X - 8 && x < SET_UPD_X + SET_UPD_W + 4) return ADV_HIT_CANCEL;
+        if (x >= ADV_CONT_X - 4 && x < ADV_CONT_X + ADV_CONT_W + 8) return ADV_HIT_CONTINUE;
+        return ADV_HIT_NONE;
+    }
+    if (y >= ADV_WARN_BOX_Y - 12 && y < ADV_WARN_BOX_Y + 46) return ADV_HIT_BOX;    /* the box or its words: the whole line */
+    return ADV_HIT_NONE;
+}
+/* touch calibration's pages */
+void render_touch_intro(uint16_t *fb, int stride, bool own_in_use, const char *msg) {
+    ctx_t c = ctx_page(fb, stride);
+    rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
+    text_centre(&c, SET_TITLE_Y, 3, 0xffffff, "TOUCH");
+    int y = SET_TITLE_Y + 46;
+    text_centre(&c, y, 2, MSP_TEAL, "HOLD THE TANK THE WAY"); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "YOU USUALLY DO."); y += 34;
+    text_centre(&c, y, 2, MSP_TEAL, "NINE CROSSES COME UP."); y += 22;
+    text_centre(&c, y, 2, MSP_TEAL, "TAP THE MIDDLE OF EACH ONE.");
+    lit_button(&c, (PAGE_W - ADV_START_W) / 2, ADV_START_Y, ADV_START_W, SET_SEG_H, "START");
+    if (own_in_use) button(&c, (PAGE_W - ADV_RESET_W) / 2, ADV_RESET_Y, ADV_RESET_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "RESET TOUCH", 2);
+    if (msg) text_centre(&c, ADV_RESET_Y + MSP_CLOSE_H + 10, 2, 0xffffff, msg);
+    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "BACK", 2);
+}
+int render_touch_intro_tap(float x, float y, bool own_in_use) {
+    x -= PAGE_X; y -= PAGE_Y;
+    if (x >= SET_CLOSE_X - 8 && y >= SET_FOOT_Y - 4) return ADV_HIT_BACK;
+    if (fabsf(x - PAGE_W / 2) < ADV_START_W / 2 + 12 && y >= ADV_START_Y - 12 && y < ADV_START_Y + SET_SEG_H + 6) return ADV_HIT_START;
+    if (own_in_use && fabsf(x - PAGE_W / 2) < ADV_RESET_W / 2 + 12 && y >= ADV_RESET_Y - 6 && y < ADV_RESET_Y + MSP_CLOSE_H + 12) return ADV_HIT_RESET;
+    return ADV_HIT_NONE;
+}
+static void touch_cross(ctx_t *c, int fx, int fy, uint32_t rgb) {      /* a cross at FRAME px */
+    int x = fx - PAGE_X, y = fy - PAGE_Y;
+    rect_fill(c, x - 24, y - 1, 49, 3, rgb); rect_fill(c, x - 1, y - 24, 3, 49, rgb);
+    rect_fill(c, x - 4, y - 4, 9, 9, 0xffffff);
+}
+void render_touch_cross(uint16_t *fb, int stride, int i, int n, int tx, int ty) {
+    ctx_t c = ctx_page(fb, stride);
+    char txt[32];
+    rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
+    touch_cross(&c, tx, ty, MSP_TEAL);
+    snprintf(txt, sizeof txt, "TAP THE CROSS  %d OF %d", i + 1, n);
+    text_centre(&c, ty - PAGE_Y < PAGE_H / 2 ? PAGE_H - 60 : 46, 2, 0xffffff, txt);
+}
+void render_touch_check(uint16_t *fb, int stride, int tx, int ty, float secs_left, float secs_total) {
+    ctx_t c = ctx_page(fb, stride);
+    char txt[40];
+    rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
+    touch_cross(&c, tx, ty, MSP_TEAL);
+    int y = ty - PAGE_Y < PAGE_H / 2 ? PAGE_H - 96 : 30;
+    text_centre(&c, y, 2, 0xffffff, "TAP THIS CROSS TO KEEP"); y += 22;
+    text_centre(&c, y, 2, 0xffffff, "THE NEW TOUCH"); y += 28;
+    int s = (int)ceilf(secs_left < 0 ? 0 : secs_left);
+    snprintf(txt, sizeof txt, "THE OLD ONE COMES BACK IN %d", s);
+    text_centre(&c, y, 2, MSP_QUIET, txt); y += 24;
+    int bw = 240, bx = (PAGE_W - bw) / 2;                    /* the time left, a bar that shrinks */
+    float f = secs_total > 0 ? secs_left / secs_total : 0; if (f < 0) f = 0;
+    rect_edge(&c, bx, y, bw, 8, MSP_DIM);
+    rect_fill(&c, bx + 2, y + 2, (int)((bw - 4) * f), 4, MSP_TEAL);
 }

@@ -420,8 +420,32 @@ enum { SET_TAP_NONE = 0, SET_TAP_CLOSE = 1, SET_TAP_BRIGHT = 2, SET_TAP_VOLUME =
        SET_TAP_BRIGHT_LIVE = 10 };  /* the BRIGHTNESS slider under a finger (0.3.9): *value = the percent, the panel's to
                                        show now; SET_TAP_BRIGHT follows with the last one when the finger lifts */
 void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, int volume);
+/* THE ADVANCED PAGE's pictures and hit tests (0.3.9.2; the page itself is
+ * common/advanced.c, hidden behind a BOOT chord on the settings page). The
+ * hit tests take FRAME px, like render_settings_tap.
+ * render_advanced: TOUCH (CALIBRATE) and BATTERY (the size picked between
+ * two arrows; a sign on it when it charges faster than the board's own;
+ * SET <size> while the pick is not the size in use), BACK.
+ * render_battery_warning: the sign, WARNING, the risk in plain words, the
+ * box to tick ("MY BATTERY IS <size> OR BIGGER"), CANCEL, CONTINUE (an
+ * outline with dim words until the box is ticked: brightness and fill, not
+ * hue). The touch pages: the first one (START; RESET TOUCH while the
+ * keeper's own map is in use; msg = a line of news, or NULL), a cross (i of
+ * n, its centre in FRAME px - as the panel reports), and the check that
+ * keeps the new map: one more cross before secs_left runs out. */
+enum { ADV_HIT_NONE = 0, ADV_HIT_BACK, ADV_HIT_CALIBRATE, ADV_HIT_PREV, ADV_HIT_NEXT, ADV_HIT_SET,
+       ADV_HIT_BOX, ADV_HIT_CANCEL, ADV_HIT_CONTINUE, ADV_HIT_START, ADV_HIT_RESET };
+void render_advanced(uint16_t *fb, int stride, int pick_mah, int pick_ma, int set_mah, bool stock, bool fast);
+int  render_advanced_tap(float x, float y);
+void render_battery_warning(uint16_t *fb, int stride, int cell_mah, int charge_ma, bool checked);
+int  render_battery_warning_tap(float x, float y);
+void render_touch_intro(uint16_t *fb, int stride, bool own_in_use, const char *msg);
+int  render_touch_intro_tap(float x, float y, bool own_in_use);
+void render_touch_cross(uint16_t *fb, int stride, int i, int n, int tx, int ty);
+void render_touch_check(uint16_t *fb, int stride, int tx, int ty, float secs_left, float secs_total);
 int  render_settings_tap(float x, float y, int *value);
 int  render_settings_touch(tank_t *t, float x, float y, bool down, int *value);
+void render_settings_cancel(void);              /* forget the press in hand (the BOOT chord took that finger to the ADVANCED page) */
 
 /* UI primitives (2026-09-13) for panels built outside this file (the first-
  * run setup in common/setup.c): the confirm prompt's pixel font, flat rects
